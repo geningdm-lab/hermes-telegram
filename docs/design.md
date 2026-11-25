@@ -247,10 +247,10 @@ Deferred by the owner, 2026-11-25:
 
 4. The cause of today's failed file sends (PRD Q12). The gateway logs are not available now ("Прямо сейчас доступ к логам не могу дать. Пока можешь конкретно эту проблему с файлами задеферить"). Slice 2 keeps the likely cause under Files as a hypothesis and makes either cause visible in the chat; confirming it waits for the host's gateway log (`Skipping MEDIA directive path`, or Telegram's refusal).
 
-Open, asked by push on 2026-11-25:
+Decided by the owner in chat, 2026-11-25:
 
-5. Should the `telegram` tools be listed to the model directly (`tools.tool_search.defer` or a direct-surface entry), instead of behind the tool search bridge? Direct listing costs their schemas in every prompt; the bridge costs a lookup before the first call. Slice 2 keeps Hermes' default, the bridge.
-6. When Telegram's reply to a final answer is lost, so it is unknown whether the user saw it, Hermes' delivery ledger resends it later with a "may be a duplicate" marker. Keep that (a possible marked duplicate), or drop it (a possible lost answer)? Slice 2 keeps Hermes' policy and removed only the unmarked immediate retry (docs/review-log.md, slice 2, disputed).
+5. The `telegram` tools in a Telegram session. The owner: the session knows it is a Telegram one, so that knowledge should be in its context ("сессия знает когда она пользуется телеграмом и тогда у него должны были эти знания в контексте"). Hermes at the pin has no per-plugin switch to keep a plugin's tools out of tool search (`tools/tool_search.py:150-162`; the only switch is `tools.tool_search.enabled: off`, which makes every tool eager). In a Telegram session the knowledge is in context already: the platform hint names `telegram_send` and `telegram_status`, and the tool search listing carries each deferred tool's name and first sentence; only the full schema loads on the first call. Asked between keeping that, turning tool search off for the profile, and asking Hermes upstream for a per-plugin option, the owner chose to keep the bridge.
+6. After Telegram's reply to a final answer is lost, Hermes' delivery ledger resends it later with a "may be a duplicate" marker. The owner: keep it, a resend is better ("согласен, лучше переотправить"). The finding disputed in the slice 2 review stays as it is (docs/review-log.md).
 
 ## Out of scope
 
