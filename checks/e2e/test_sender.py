@@ -28,7 +28,7 @@ TOPIC = "77"
 
 
 class Wire(httpx.AsyncBaseTransport):
-    """httpx's own transport, with a connection failure on chosen ``sendRichMessage`` calls.
+    """httpx's own transport, with a connection failure on chosen calls of a Bot API method.
 
     ``refused``: the connection never opens (httpx.ConnectError). ``pool``: no pooled connection is free
     (httpx.PoolTimeout). ``lost``: the request reaches Telegram, then the connection drops before the reply
@@ -36,14 +36,17 @@ class Wire(httpx.AsyncBaseTransport):
 
     def __init__(self) -> None:
         self._inner = httpx.AsyncHTTPTransport()
-        self._rich_calls = 0
-        self.faults: dict[int, str] = {}  # sendRichMessage call number (from 1) -> fault
+        self._calls: dict[str, int] = {}
+        self._faults: dict[tuple[str, int], str] = {}
+
+    def fail(self, method: str, call: int, fault: str) -> None:
+        """Fail the ``call``-th request (from 1) of ``method`` with ``fault``."""
+        self._faults[(method, call)] = fault
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if not request.url.path.endswith("/sendRichMessage"):
-            return await self._inner.handle_async_request(request)
-        self._rich_calls += 1
-        fault = self.faults.get(self._rich_calls)
+        method = request.url.path.rsplit("/", 1)[-1]
+        self._calls[method] = self._calls.get(method, 0) + 1
+        fault = self._faults.get((method, self._calls[method]))
         if fault == "refused":
             raise httpx.ConnectError("[Errno 61] Connection refused", request=request)
         if fault == "pool":
@@ -126,14 +129,14 @@ async def test_a_one_part_answer_is_shown_exactly_once_whatever_the_connection_f
     # refused and pool never reached Telegram, so the base retry sends the answer again; lost did, so
     # nothing may send it again (before the fix: pool was given up, lost was shown twice).
     body = _answer(1)
-    sender.wire.faults[1] = fault
+    sender.wire.fail("sendRichMessage", 1, fault)
     await sender.adapter._send_with_retry(CHAT, body, base_delay=0)
     assert sender.words(CHAT) == _words(body)
 
 
 @pytest.mark.parametrize(("fault", "completes"), [("refused", True), ("pool", True), ("lost", False)])
 async def test_a_failed_middle_part_is_resumed_only_when_it_certainly_was_not_shown(sender, fault, completes):
-    sender.wire.faults[2] = fault
+    sender.wire.fail("sendRichMessage", 2, fault)
     result = await sender.adapter._send_with_retry(CHAT, LONG, base_delay=0)
     shown = sender.words(CHAT)
     if completes:
@@ -219,3 +222,25 @@ async def test_a_wide_table_shown_as_code_inside_a_longer_fence_is_not_refused(s
     body = "## Example\n\n````markdown\n```\n" + table + "```\n````\n"
     result = await sender.adapter.send(CHAT, body)
     assert result.success and [v.extra["kind"] for v in sender.shown(CHAT)] == ["rich"]
+
+
+
+# Regressions from the Codex review of slice 2 (docs/review-log.md).
+
+
+async def test_a_markdownv2_fallback_chunk_whose_reply_was_lost_is_not_sent_again(sender):
+    # The harvested chunk sender retries a dropped connection; inside a rich answer that shows it twice.
+    sender.refuse("sendRichMessage", "Bad Request: can't parse rich message")
+    sender.wire.fail("sendMessage", 1, "lost")
+    result = await sender.adapter._send_with_retry(CHAT, _answer(2, words=1500), base_delay=0)
+    assert not result.success
+    assert len(sender.standin.calls_of("sendMessage")) == 1  # the lost chunk once, nothing after it
+
+
+async def test_a_timedelta_flood_wait_on_a_fallback_chunk_is_waited_out(sender, monkeypatch):
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    sender.refuse("sendRichMessage", "Bad Request: can't parse rich message")
+    sender.refuse("sendMessage", "Too Many Requests: retry after 1", status=429, times=1, retry_after=1)
+    body = _answer(2, words=1500)
+    result = await sender.adapter._send_with_retry(CHAT, body, base_delay=0)
+    assert result.success and sender.words(CHAT) == _words(body)
