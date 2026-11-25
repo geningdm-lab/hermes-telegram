@@ -306,3 +306,36 @@ The widget check:
 |---|---|
 | [P2] Text naming an API, and links, are refused | the network check reads only the widget's code, without its string literals and comments; `<a href>` is allowed; `checks/test_widgets.py::test_a_widget_that_only_mentions_the_network_or_links_out_passes` |
 | [P2] Relative images and workers pass | every resource attribute and CSS `url()` must be a fragment or a `data:` PNG, JPEG, GIF or WebP; `Worker`, `SharedWorker`, `BroadcastChannel` and `RTCPeerConnection` are network APIs; media and frame elements are refused; `checks/test_widgets.py::test_a_widget_telegram_or_its_sandbox_would_refuse_is_named_with_the_reason` |
+
+## Slice 6, PR #8
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:slice/5-widgets` (`7688fce`) at `0b91437`, 2026-11-25. Twelve findings, all accepted and fixed. The tests named are in `checks/test_message_ops.py`; each was checked against a mutation of its fix.
+
+### Accepted and fixed
+
+Whose message it is:
+
+| Finding | Fix |
+|---|---|
+| [P1] Ownership is not bound to the bot that sent it | each record names the bot (the token's id); another bot's record authorizes nothing; `test_a_message_another_bot_sent_in_the_same_chat_is_not_this_bots` |
+| [P1] The requested topic is recorded, not the delivered one | `_delivered_thread`: a send that fell back to the root chat (`thread_fallback`, a returned message without a topic) is recorded without the topic; `test_a_media_send_that_fell_back_to_the_root_chat_is_not_in_the_topic` |
+| [P1] Message changes ignore the routed profile | each record names the profile the chat was routed to, checked against the turn's; `test_a_message_sent_for_another_profile_is_not_this_turns` |
+| [P1] Records without a kind are edited as text | only a record whose kind is `text` is edited, so a prompt kept by slice 5 keeps its approval buttons; `test_a_message_recorded_before_kinds_existed_is_not_edited` |
+
+Edits:
+
+| Finding | Fix |
+|---|---|
+| [P2] The edit's form follows the new text, not the message | an ordinary message stays MarkdownV2 (with a note when the text has structure only rich shows), a rich one stays rich; `test_an_ordinary_message_is_edited_as_one_and_a_rich_one_as_rich` |
+| [P2] Hermes' reply context is stale after a rich edit | a rich edit, and a tool's rich message, are recorded in `rich_sent_store`; same test |
+| [P2] An unconfirmed edit trusts the old keyboard | the old set is retired, the new one bound and kept as the message's keyboard, and the agent is told the edit may not have been applied; `test_an_edit_telegram_did_not_confirm_retires_the_old_choices` |
+| [P2] `buttons: []` keeps the keyboard | it removes the keyboard and retires its set; `test_an_empty_button_list_removes_the_keyboard` |
+| [P2] A deleted message's taps, widget requests and votes still reach the agent | a delete retires its buttons, widget and poll; `test_a_deleted_messages_taps_widget_requests_and_votes_reach_nobody` |
+
+Replies and effects:
+
+| Finding | Fix |
+|---|---|
+| [P2] A quote loses the formatting Telegram matches | the turn keeps the user's text and entities; a quote carries the entities over its span (`quote_parts`); a quote of the bot's own messages, whose entities and rich blocks are not kept, is refused; `test_a_quote_carries_the_formatting_telegram_matches`, `test_a_quote_telegram_would_not_match_is_refused_before_anything_is_reserved` |
+| [P2] A quote in a turn a tap started reserves slots and fails | refused before anything is reserved: such a turn has no message text; same test |
+| [P2] An effect Telegram did not apply reads as success | `0` (no effect) is refused; a message returned without the effect asked for is reported; the stand-in returns `effect_id` as Telegram does; `test_an_effect_telegram_did_not_apply_is_reported_and_no_effect_is_refused` |
