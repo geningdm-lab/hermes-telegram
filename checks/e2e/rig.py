@@ -37,6 +37,10 @@ def _require_pinned_source() -> None:
     dirty = _git("status", "--porcelain")
     if dirty:
         raise RuntimeError(f"{HERMES_SRC} differs from the pin:\n{dirty}")
+    # Ignored by git, yet read by the child: hermes_cli/main.py:715 loads the source root's .env as a
+    # development fallback, which could bring real credentials or a webhook URL into a test gateway.
+    if (HERMES_SRC / ".env").exists():
+        raise RuntimeError(f"{HERMES_SRC / '.env'} exists; the test gateway would load it. Remove it.")
 
 
 _require_pinned_source()
@@ -52,10 +56,22 @@ __all__ = ["C", "PluginGatewayUnderTest", "PluginTelegramDriver", "rig_fixtures"
 
 
 class PluginTelegramDriver(TelegramDriver):
-    """Hermes' Telegram driver, with this plugin enabled in the gateway's configuration."""
+    """Hermes' Telegram driver, with this plugin enabled in the gateway's configuration.
+
+    ``connected`` waits for a poll newer than the latest start: Hermes' driver accepts any earlier
+    ``getUpdates``, so on a restart it would report a connection the new process has not made.
+    """
+
+    _polls_before_start = 0
 
     def gateway_config(self) -> dict[str, Any]:
         return C.merge(super().gateway_config(), {"plugins": {"enabled": ["platforms/telegram"]}})
+
+    def expect_fresh_poll(self) -> None:
+        self._polls_before_start = len(self.standin.calls_of("getUpdates"))
+
+    def connected(self) -> bool:
+        return len(self.standin.calls_of("getUpdates")) > self._polls_before_start
 
 
 class PluginGatewayUnderTest(GatewayUnderTest):
@@ -72,15 +88,21 @@ class PluginGatewayUnderTest(GatewayUnderTest):
         return self.hermes_home / "logs" / "gateway.log"
 
     def start(self, timeout: float = 60.0) -> "PluginGatewayUnderTest":
-        # The log is appended across restarts: only lines this start adds count as evidence.
-        offset = self.info_log.stat().st_size if self.info_log.exists() else 0
+        # The log is appended across restarts, and Hermes rotates it at 5 MiB (hermes_logging.py:399): only
+        # what this start adds counts, read from the start of a file that replaced the earlier one.
+        before = self.info_log.stat() if self.info_log.exists() else None
+        driver = getattr(self._ready, "__self__", None)
+        if isinstance(driver, PluginTelegramDriver):
+            driver.expect_fresh_poll()  # so start() returns only once this process has polled
         super().start(timeout)
         expected = ADAPTER_LINE + str((self.hermes_home / "plugins" / "platforms" / "telegram").resolve())
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.info_log.exists():
+                now = self.info_log.stat()
+                same_file = before is not None and (now.st_ino, now.st_dev) == (before.st_ino, before.st_dev)
                 with self.info_log.open("rb") as log:
-                    log.seek(offset)
+                    log.seek(before.st_size if same_file else 0)
                     if expected in log.read().decode("utf-8", "replace"):
                         return self
             time.sleep(0.2)
