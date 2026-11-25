@@ -9,95 +9,16 @@ Regressions from the Codex review of slice 1 (docs/review-log.md).
 
 import itertools
 import re
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable
 
-import httpx
 import pytest
 
-import checks.e2e.rig  # noqa: F401  (puts the pinned Hermes source, and with it the stand-in, on sys.path)
-from checks.e2e.standin import RichTelegramStandin
-from gateway.config import PlatformConfig
-from hermes_telegram.adapter import HermesTelegramAdapter
+from checks.e2e.wire import CHAT, sender_fixture  # noqa: F401  (the sender fixture)
 
 pytestmark = pytest.mark.e2e
 
-CHAT = "111"  # a private chat
 GROUP = "-100123"  # a forum supergroup
 TOPIC = "77"
-
-
-class Wire(httpx.AsyncBaseTransport):
-    """httpx's own transport, with a connection failure on chosen calls of a Bot API method.
-
-    ``refused``: the connection never opens (httpx.ConnectError). ``pool``: no pooled connection is free
-    (httpx.PoolTimeout). ``lost``: the request reaches Telegram, then the connection drops before the reply
-    (httpx.ReadError), so the message is on screen and the sender cannot know it."""
-
-    def __init__(self) -> None:
-        self._inner = httpx.AsyncHTTPTransport()
-        self._calls: dict[str, int] = {}
-        self._faults: dict[tuple[str, int], str] = {}
-
-    def fail(self, method: str, call: int, fault: str) -> None:
-        """Fail the ``call``-th request (from 1) of ``method`` with ``fault``."""
-        self._faults[(method, call)] = fault
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        method = request.url.path.rsplit("/", 1)[-1]
-        self._calls[method] = self._calls.get(method, 0) + 1
-        fault = self._faults.get((method, self._calls[method]))
-        if fault == "refused":
-            raise httpx.ConnectError("[Errno 61] Connection refused", request=request)
-        if fault == "pool":
-            raise httpx.PoolTimeout("no free connection", request=request)
-        response = await self._inner.handle_async_request(request)
-        if fault == "lost":
-            await response.aread()
-            raise httpx.ReadError("connection closed", request=request)
-        return response
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
-
-@dataclass
-class Sender:
-    standin: RichTelegramStandin
-    wire: Wire
-    adapter: HermesTelegramAdapter
-
-    def shown(self, chat: str) -> list[Any]:
-        return self.standin.visible(chat)
-
-    def words(self, chat: str) -> list[str]:
-        return [w for v in self.shown(chat) for w in _words(v.text)]
-
-    def refuse(self, method: str, description: str, *, status: int = 400, times: int = 10_000,
-               match: Callable[[dict[str, Any]], bool] | None = None, **parameters: Any) -> None:
-        body: dict[str, Any] = {"ok": False, "error_code": status, "description": description}
-        if parameters:
-            body["parameters"] = parameters
-        self.standin.fail(method, body, status=status, times=times, match=match)
-
-
-@pytest.fixture
-async def sender() -> AsyncIterator[Sender]:
-    from telegram import Bot
-    from telegram.request import HTTPXRequest
-
-    standin = RichTelegramStandin().start()
-    wire = Wire()
-    bot = Bot(standin.token, base_url=standin.api_base, request=HTTPXRequest(httpx_kwargs={"transport": wire}))
-    await bot.initialize()
-    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token=standin.token))
-    adapter._bot = bot
-    adapter._telegram_chat_outbound_slot_secs = 0  # no 1 s pacing between parts in tests
-    try:
-        yield Sender(standin, wire, adapter)
-    finally:
-        await bot.shutdown()
-        standin.stop()
 
 
 def _words(text: str) -> list[str]:

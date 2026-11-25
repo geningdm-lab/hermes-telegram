@@ -13,10 +13,13 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
 - ``editMessageText`` with ``rich_message`` instead of ``text`` (methods/editmessagetext.md).
 """
 
+import hashlib
 import re
 from typing import Any
 
-from tests.fakes.platforms._standin import Visible
+from aiohttp import web
+
+from tests.fakes.platforms._standin import Visible, decode_value
 from tests.fakes.platforms.telegram_standin import BotApiError, TelegramStandin
 
 RICH_MAX_CHARS = 32768
@@ -107,7 +110,24 @@ def _upload(p: dict[str, Any], field: str, limit: int) -> dict[str, Any]:
 
 
 class MediaTelegramStandin(RichTelegramStandin):
-    """``RichTelegramStandin`` that also answers the media methods the adapter uses."""
+    """``RichTelegramStandin`` that also answers the media methods the adapter uses.
+
+    An uploaded file is recorded as ``{"filename", "size", "sha256"}``: Hermes' stand-in keeps only the
+    size, which cannot tell the file's own bytes from other bytes of the same length."""
+
+    async def _params(self, request: web.Request) -> dict[str, Any]:
+        if not (request.content_type or "").startswith("multipart/"):
+            return await super()._params(request)
+        params: dict[str, Any] = dict(request.query)
+        reader = await request.multipart()
+        async for part in reader:
+            if part.filename:
+                data = await part.read()
+                params[part.name] = {"filename": part.filename, "size": len(data),
+                                     "sha256": hashlib.sha256(data).hexdigest()}
+            else:
+                params[part.name] = decode_value(await part.text())
+        return params
 
     def _media(self, p: dict[str, Any], kind: str, field: str, limit: int) -> dict[str, Any]:
         part = _upload(p, field, limit)
