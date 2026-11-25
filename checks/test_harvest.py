@@ -38,6 +38,13 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "_rich_transient_result": "RichAnswersMixin",
     "_send_text_locked": "RichAnswersMixin",
     "_resume_partial_send": "RichAnswersMixin",
+    # Slice 2, hermes_telegram/files.py.
+    "_send_local_file": "FilesMixin",
+    "send_document": "FilesMixin",
+    "send_image_file": "FilesMixin",
+    "send_multiple_images": "FilesMixin",
+    "send_video": "FilesMixin",
+    "send_voice": "FilesMixin",
 }
 
 
