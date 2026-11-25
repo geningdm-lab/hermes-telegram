@@ -168,13 +168,20 @@ def test_preparation_is_idempotent(text: str):
 
 
 def test_a_code_line_longer_than_a_message_keeps_its_fence_and_every_character():
-    line = "".join(f"w{i:05d} " for i in range(80))  # 560 characters, spaces included
-    parts = rich.split_markdown("```json\n" + line + "\n```\n", char_budget=200)
-    assert len(parts) >= 3
+    line = "".join(f"w{i:05d} " for i in range(6000))  # 42,000 characters: over Telegram's 32,768
+    parts = rich.split_markdown("```json\n" + line + "\n```\n")
+    assert len(parts) >= 2
     for part in parts:
         lines = part.splitlines()
-        assert lines[0] == "```json" and lines[-1] == "```"
-    assert "".join(p.splitlines()[1] for p in parts if len(p.splitlines()) > 2) == line
+        assert lines[0] == "```json" and lines[-1] == "```" and len(lines) >= 3  # no empty code block
+        assert len(part) <= rich.MAX_CHARS
+    assert "".join(p.splitlines()[1] for p in parts) == line  # every character, spaces included
+
+
+def test_a_line_over_the_budget_but_within_telegrams_limit_is_sent_whole():
+    formula = "$$" + "x+" * 16010 + "1$$"  # 32,025 characters on one line
+    parts = rich.split_markdown("intro\n\n" + formula + "\n\noutro\n")
+    assert any(formula in part for part in parts)
 
 
 def test_a_construct_over_the_budget_but_within_telegrams_limit_is_kept_whole():
@@ -217,3 +224,49 @@ def test_highlight_needs_rich():
 ])
 def test_unescape_dollars_for_the_ordinary_path(text: str, expected: str):
     assert rich.unescape_dollars(text) == expected
+
+
+# Regressions from the re-review of slice 1 (docs/review-log.md).
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    (r"$$\text{when \(x < y\), stop}$$", r"$$\text{when \(x < y\), stop}$$"),  # source inside a formula
+    ("text\n\n    a < b and $5\n", "text\n\n    a < b and $5\n"),  # a top-level indented code block
+    ("- item\n\n    more $5", "- item\n\n    more \\$5"),  # in a list, the same indentation continues the item
+])
+def test_preparation_leaves_formula_and_indented_code_source_alone(text: str, expected: str):
+    assert rich.prepare_markdown(text) == expected
+
+
+def test_a_large_table_header_is_repeated_while_the_next_row_still_fits():
+    header = "| " + "h" * 16000 + " | b |\n|---|---|\n"
+    rows = "".join(f"| {i} | w{i:05d} |\n" for i in range(600))
+    parts = rich.split_markdown(header + rows)  # the block budget forces cuts, not the characters
+    assert len(parts) >= 2
+    assert all(part.startswith(header) for part in parts)
+
+
+def test_footnote_definitions_come_from_prose_with_their_continuations():
+    filler = "\n\n".join("w00000 " * 30 for _ in range(10))
+    text = ("Result[^x] here.\n\n```\n[^x]: fake, in a code example\n```\n\n" + filler
+            + "\n\n[^x]: real source\n    continued on the next line\n")
+    parts = rich.split_markdown(text, char_budget=800)
+    assert "[^x]: real source\n    continued on the next line\n" in parts[0]
+
+
+def test_the_cut_leaves_room_for_the_definitions_a_part_needs():
+    # A reference in an almost full part: its 1,206-character definition must still fit beside it.
+    paragraphs = "\n\n".join("".join(f"w{p:02d}{i:03d} " for i in range(142)) for p in range(32))  # ~1 KB each
+    text = "Ref[^n] here.\n\n" + paragraphs + "\n\n[^n]: " + "d" * 1200 + "\n"
+    parts = rich.split_markdown(text)
+    first = next(p for p in parts if "Ref[^n]" in p)
+    assert "[^n]: " + "d" * 1200 in first and len(first) <= rich.MAX_CHARS
+
+
+def test_ordinary_path_keeps_escapes_inside_html_code():
+    assert rich.unescape_dollars(r"pay \$5 with <code>echo \$HOME</code>") == r"pay $5 with <code>echo \$HOME</code>"
+
+
+def test_a_part_falling_back_to_markdownv2_loses_only_the_escapes_preparation_added():
+    prepared = rich.prepare_markdown("List<String> costs $5, `a\\<b`")
+    assert rich.plain_source(prepared) == "List<String> costs $5, `a\\<b`"

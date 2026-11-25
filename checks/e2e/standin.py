@@ -35,13 +35,17 @@ def _check_rich(p: dict[str, Any]) -> str:
     text = str(rich["markdown"])
     if len(text) > RICH_MAX_CHARS:
         raise BotApiError("Bad Request: rich message is too long")
-    in_fence = False
+    fence = ""  # the opening run of the fenced code block the line is in
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if re.match(r"^\s*(```|~~~)", line):
-            in_fence = not in_fence
+        # CommonMark: a fence closes with the same character, at least as long, and nothing after it.
+        run = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if run and not fence:
+            fence = run.group(1)
+        elif run and run.group(1)[0] == fence[0] and len(run.group(1)) >= len(fence) and not run.group(2).strip():
+            fence = ""
         # A table is a header row followed by its separator row; anything else is not one.
-        elif (not in_fence and i > 0 and "|" in lines[i - 1]
+        elif (not fence and i > 0 and "|" in lines[i - 1]
               and re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", line)):
             if len(line.strip().strip("|").split("|")) > RICH_MAX_COLUMNS:
                 raise BotApiError("Bad Request: too many table columns")

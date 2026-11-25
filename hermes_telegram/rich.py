@@ -92,28 +92,54 @@ def _closes(match: re.Match[str] | None, fence: str) -> bool:
                 and not match.group("info").strip())
 
 
+_INDENTED_CODE_RE = re.compile(r"^(?: {4}|\t)")
+
+
 def _segments(text: str) -> list[_Segment]:
-    """``text`` cut into fenced code blocks (``is_code``) and the prose between them, losslessly."""
+    """``text`` cut into code (``is_code``) and the prose between them, losslessly.
+
+    Code is a fenced block, or an indented code block: lines indented by four spaces or a tab after a
+    blank line, outside a list (inside a list that indentation continues the item, CommonMark 5.2)."""
     lines = text.splitlines(keepends=True)
     out: list[_Segment] = []
     prose: list[str] = []
-    i = 0
-    while i < len(lines):
-        opening = _FENCE_RE.match(lines[i].rstrip("\r\n"))
-        if opening is None:
-            prose.append(lines[i])
-            i += 1
-            continue
-        j = i + 1
-        while j < len(lines) and not _closes(_FENCE_RE.match(lines[j].rstrip("\r\n")), opening.group("fence")):
-            j += 1
+
+    def flush() -> None:
         if prose:
             out.append(_Segment("".join(prose), False))
-            prose = []
-        out.append(_Segment("".join(lines[i:j + 1]), True))  # an unclosed fence runs to the end, as in GFM
-        i = j + 1
-    if prose:
-        out.append(_Segment("".join(prose), False))
+            prose.clear()
+
+    i, prev_blank, in_list = 0, True, False
+    while i < len(lines):
+        bare = lines[i].rstrip("\r\n")
+        opening = _FENCE_RE.match(bare)
+        if opening is not None:
+            j = i + 1
+            while j < len(lines) and not _closes(_FENCE_RE.match(lines[j].rstrip("\r\n")), opening.group("fence")):
+                j += 1
+            flush()
+            out.append(_Segment("".join(lines[i:j + 1]), True))  # an unclosed fence runs to the end, as in GFM
+            i, prev_blank = j + 1, False
+            continue
+        if prev_blank and not in_list and bare.strip() and _INDENTED_CODE_RE.match(bare):
+            j = i
+            while j < len(lines) and (not lines[j].strip() or _INDENTED_CODE_RE.match(lines[j])):
+                j += 1
+            while j > i and not lines[j - 1].strip():
+                j -= 1  # trailing blank lines are not part of the block
+            flush()
+            out.append(_Segment("".join(lines[i:j]), True))
+            i = j
+            continue
+        if bare.strip():
+            if _LIST_ITEM_RE.match(bare):
+                in_list = True
+            elif not bare.startswith((" ", "\t")):
+                in_list = False
+        prev_blank = not bare.strip()
+        prose.append(lines[i])
+        i += 1
+    flush()
     return out
 
 
@@ -132,9 +158,10 @@ class _Masks:
         return pattern.sub(lambda m: self.put(m.group(0)), text)
 
     def restore(self, text: str) -> str:
-        # A piece stored later may hold placeholders stored earlier, never the reverse: newest first.
-        for i in range(len(self._store) - 1, -1, -1):
-            text = text.replace(f"\x00{self._token}:{i}\x00", self._store[i])
+        # One pass per nesting level: a stored piece may hold placeholders stored before it.
+        pattern = re.compile(f"\x00{self._token}:(\\d+)\x00")
+        while pattern.search(text):
+            text = pattern.sub(lambda m: self._store[int(m.group(1))], text)
         return text
 
 
@@ -230,11 +257,12 @@ def _hard_breaks(text: str) -> str:
 def _prepare_prose(text: str, masks: _Masks) -> str:
     text = masks.mask(text, _INLINE_CODE_RE)
     text = masks.mask(text, _HTML_CODE_RE)
+    # Formulas the agent wrote with dollars first, so nothing inside them is rewritten.
+    text = masks.mask(text, _DISPLAY_MATH_RE)
+    text = _protect_inline_maths(text, masks)
     # LaTeX delimiters models often write, turned into the ones Telegram reads, and set aside whole.
     text = _BRACKET_MATH_RE.sub(lambda m: masks.put("$$" + m.group(1).strip() + "$$"), text)
     text = _PAREN_MATH_RE.sub(lambda m: masks.put("$" + m.group(1).strip() + "$"), text)
-    text = masks.mask(text, _DISPLAY_MATH_RE)
-    text = _protect_inline_maths(text, masks)
     text = masks.mask(text, _ALLOWED_TAG_RE)
     text = masks.mask(text, _AUTOLINK_RE)
     text = re.sub(r"(?<!\\)<", lambda _m: "\\<", text)
@@ -254,18 +282,31 @@ def prepare_markdown(text: str) -> str:
     return masks.restore(prepared)
 
 
-def unescape_dollars(text: str) -> str:
-    """``\\$`` written as ``$`` outside code, for the ordinary message path, which shows text as written.
-
-    The hint tells the agent to escape a literal dollar; only rich Markdown reads that escape."""
+def _unescape_prose(text: str, escapes: tuple[str, ...]) -> str:
     masks = _Masks()
     out = []
     for segment in _segments(text):
         if segment.is_code:
             out.append(segment.text)
-        else:
-            out.append(masks.mask(segment.text, _INLINE_CODE_RE).replace("\\$", "$"))
+            continue
+        prose = masks.mask(masks.mask(segment.text, _INLINE_CODE_RE), _HTML_CODE_RE)
+        for escape in escapes:
+            prose = prose.replace("\\" + escape, escape)
+        out.append(prose)
     return masks.restore("".join(out))
+
+
+def unescape_dollars(text: str) -> str:
+    """``\\$`` written as ``$`` outside code, for the ordinary message path, which shows text as written.
+
+    The hint tells the agent to escape a literal dollar; only rich Markdown reads that escape."""
+    return _unescape_prose(text, ("$",))
+
+
+def plain_source(prepared: str) -> str:
+    """Prepared rich Markdown with the escapes preparation adds (``\\$``, ``\\<``) taken out again, for a
+    part that has to go by the ordinary MarkdownV2 path after all."""
+    return _unescape_prose(prepared, ("$", "<"))
 
 
 # --- cutting a long answer -----------------------------------------------------------------------------------
@@ -402,29 +443,67 @@ def _with_newline(text: str) -> str:
     return text if text.endswith("\n") else text + "\n"
 
 
+def _footnote_definitions(text: str) -> dict[str, str]:
+    """Footnote definitions outside code, each with its indented continuation lines, by id."""
+    out: dict[str, str] = {}
+    for segment in _segments(text):
+        if segment.is_code:
+            continue
+        lines = segment.text.splitlines(keepends=True)
+        i = 0
+        while i < len(lines):
+            found = _FOOTNOTE_DEF_RE.match(lines[i])
+            if not found:
+                i += 1
+                continue
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and lines[j].startswith((" ", "\t")):
+                j += 1
+            out.setdefault(found.group(1), _with_newline("".join(lines[i:j])))
+            i = j
+    return out
+
+
 def split_markdown(text: str, char_budget: int = CHAR_BUDGET, block_budget: int = BLOCK_BUDGET) -> list[str]:
     """Cut prepared Markdown into parts that each fit one rich message, in order.
 
     A cut prefers a blank line, then a boundary before a table row, list item, quote line or heading, then
     any line boundary, and goes inside a fenced block only when nothing else fits: the block is then closed
     at the end of the part and reopened with its info string at the start of the next. A part that starts
-    inside a table repeats the table's header. A maths or details block that does not fit the budget but
-    fits Telegram's limit is kept whole. A part whose footnote references are defined in another part gets
-    a copy of those definitions. A single line longer than the budget is cut at spaces.
+    inside a table repeats the table's header when it still fits beside the next row. A construct (a maths
+    or details block, a single long line) over the budget but within Telegram's limit is kept whole. A part
+    whose footnote references are defined in another part gets a copy of those definitions, and the budget
+    leaves room for them. A line over Telegram's limit is cut at spaces.
     """
     if len(text) <= char_budget and estimate_blocks(text) <= block_budget:
         return [text]
+    definitions = _footnote_definitions(text) if _FOOTNOTE_REF_RE.search(text) else {}
+    char_budget -= min(sum(len(d) for d in definitions.values()), char_budget // 4)
     lines = _classify(text)
     parts: list[str] = []
     start, carry = 0, ""
     while start < len(lines):
-        if len(carry) * 2 > char_budget:
-            carry = ""  # a header this large is not worth repeating; the cut must still make progress
-        if len(carry) + len(lines[start].text) > char_budget:
-            # One line alone is over the budget: cut it into pieces that fit.
-            line = lines[start]
+        line = lines[start]
+        if carry and line.fence_open and not line.opens_fence and carry == _with_newline(line.fence_open):
+            opening = _FENCE_RE.match(line.fence_open.rstrip("\r\n"))
+            if opening and _closes(_FENCE_RE.match(line.text.rstrip("\r\n")), opening.group("fence")):
+                # The reopened block would close at once: the part before already closed it.
+                carry, start = "", start + 1
+                continue
+        if carry and not _FENCE_RE.match(carry.splitlines()[0]) and len(carry) + len(line.text) > char_budget:
+            # A repeated table header that would leave no room for the row: repeat it no more, keep making
+            # progress. (A reopened fence is never dropped: the code after it needs it.)
+            carry = ""
+        if len(carry) + len(line.text) > char_budget:
             in_code = bool(line.fence_open) and not line.opens_fence
             closing = _closing_fence(line.fence_open) if in_code else ""
+            if len(carry) + len(line.text) + len(closing) <= MAX_CHARS:
+                # Over the working budget but within Telegram's limit: one part of its own, whole.
+                parts.append(carry + line.text + closing)
+                carry = _with_newline(line.fence_open) if in_code else ""
+                start += 1
+                continue
+            # Over Telegram's limit: cut the line into pieces that fit.
             first, *rest = _split_long_line(line.text, char_budget - len(carry) - len(closing), verbatim=in_code)
             parts.append(carry + first + closing)
             lines[start:start + 1] = [replace(line, text=piece, blocks=0, opens_fence=False, no_cut_before=False)
@@ -440,6 +519,12 @@ def split_markdown(text: str, char_budget: int = CHAR_BUDGET, block_budget: int 
         if end == len(lines):
             parts.append(carry + "".join(line.text for line in lines[start:end]))
             break
+        if end == start + 1 and lines[start].opens_fence:
+            # The part would hold only a fence's opening line: carry it into the next part instead of
+            # sending an empty code block.
+            carry += lines[start].text
+            start += 1
+            continue
         cut = max(range(start + 1, end + 1), key=lambda i: (_cut_priority(lines, i), i))
         if _cut_priority(lines, cut) < 0:
             # Every cut would break a construct: keep it whole if it fits Telegram's own limits.
@@ -460,26 +545,18 @@ def split_markdown(text: str, char_budget: int = CHAR_BUDGET, block_budget: int 
             carry = "".join(nxt.table_header)
         parts.append(body)
         start = cut
-    return _carry_footnotes([part for part in parts if part.strip()])
+    return _carry_footnotes([part for part in parts if part.strip()], definitions)
 
 
-def _carry_footnotes(parts: list[str]) -> list[str]:
+def _carry_footnotes(parts: list[str], definitions: dict[str, str]) -> list[str]:
     """Each part gets copies of the footnote definitions its references need but another part holds."""
-    if len(parts) < 2:
-        return parts
-    definitions: dict[str, str] = {}
-    for part in parts:
-        for line in part.splitlines():
-            found = _FOOTNOTE_DEF_RE.match(line)
-            if found:
-                definitions.setdefault(found.group(1), line)
-    if not definitions:
+    if len(parts) < 2 or not definitions:
         return parts
     out = []
     for part in parts:
-        defined = {m.group(1) for line in part.splitlines() if (m := _FOOTNOTE_DEF_RE.match(line))}
+        defined = set(_footnote_definitions(part))
         needed = [i for i in dict.fromkeys(_FOOTNOTE_REF_RE.findall(part)) if i in definitions and i not in defined]
-        extra = "\n".join(definitions[i] for i in needed)
-        out.append(_with_newline(part) + "\n" + extra + "\n" if extra and len(part) + len(extra) + 2 <= MAX_CHARS
+        extra = "".join(definitions[i] for i in needed)
+        out.append(_with_newline(part) + "\n" + extra if extra and len(part) + len(extra) + 2 <= MAX_CHARS
                    else part)
     return out

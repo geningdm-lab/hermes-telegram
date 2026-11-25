@@ -13,6 +13,7 @@ harvested path; slice 3 owns it (docs/review-log.md, slice 1).
 import asyncio
 import re
 from collections import deque
+from datetime import timedelta
 from typing import Any, Optional
 
 from gateway.platforms.base import SendResult, utf16_len
@@ -75,19 +76,41 @@ class RichAnswersMixin:
     def _rich_parts(prepared: str) -> list[str]:
         return rich.split_markdown(prepared)
 
-    def _rich_transient_result(self, exc: Exception, what: str, *, retry_after: Any = None) -> SendResult:
-        """The harvested result, marked when the part was certainly not delivered.
-
-        Certain: Telegram refused it (a flood wait), or the connection never opened. Not certain: a timeout
-        or a connection lost after the request went out; Telegram may have shown the part."""
-        result = super()._rich_transient_result(exc, what, retry_after=retry_after)
-        unsent = retry_after is not None or self._looks_like_connect_timeout(exc) or any(
+    def _certainly_unsent(self, exc: BaseException) -> bool:
+        """Telegram certainly did not show the message: it refused it with a flood wait, or the request never
+        left (the connection did not open, or no pooled connection was free). A timeout or a connection lost
+        after the request went out is not certain: Telegram may have shown it."""
+        try:  # imported here: the SDK may be installed after this module loads (ensure_deps_fn)
+            from telegram.error import RetryAfter
+        except ImportError:
+            RetryAfter = None
+        if RetryAfter is not None and isinstance(exc, RetryAfter):
+            return True
+        return bool(self._looks_like_connect_timeout(exc) or self._looks_like_pool_timeout(exc) or any(
             "connecterror" in cur.__class__.__name__.lower() or "connecterror" in str(cur).lower()
-            for cur in _iter_exception_graph(exc))
+            for cur in _iter_exception_graph(exc)))
+
+    def _rich_transient_result(self, exc: Exception, what: str, *, retry_after: Any = None) -> SendResult:
+        """The harvested result, marked with whether the part certainly was not delivered.
+
+        PTB may give a flood wait as a ``timedelta``; the cooldown and the base retry count seconds. A pool
+        timeout never left (PTB says so), so it is retryable as a connect timeout is."""
+        if isinstance(retry_after, timedelta):
+            retry_after = retry_after.total_seconds()
+        result = super()._rich_transient_result(exc, what, retry_after=retry_after)
+        unsent = retry_after is not None or self._certainly_unsent(exc)
+        if self._looks_like_pool_timeout(exc):
+            result.retryable = True
         raw = dict(result.raw_response) if isinstance(result.raw_response, dict) else {}
         raw["certainly_unsent"] = bool(unsent)
         result.raw_response = raw
         return result
+
+    def _send_retry_is_final(self, result: SendResult) -> bool:
+        """A part that may have been shown is never sent again: not by the base retry, which would resend the
+        whole answer, and not by its plain-text fallback."""
+        raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+        return bool(raw.get("ambiguous_delivery")) or super()._send_retry_is_final(result)
 
     # --- sending ----------------------------------------------------------------------------------------
 
@@ -114,8 +137,10 @@ class RichAnswersMixin:
         self._hold_chat_outbound_slot(chat_id)
 
     def _as_plain_chunks(self, markdown: str) -> list[Item]:
-        """A part as MarkdownV2 chunks, prepared as the harvested sender prepares its chunks."""
-        chunks = self.truncate_message(self.format_message(markdown), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+        """A prepared part as MarkdownV2 chunks, made from the agent's text (without the escapes preparation
+        added) as the harvested sender makes its chunks."""
+        source = rich.plain_source(markdown)
+        chunks = self.truncate_message(self.format_message(source), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
         if len(chunks) > 1:
             # truncate_message appends a raw " (1/2)"; MarkdownV2 reserves the parentheses.
             chunks = [_separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", c))
@@ -128,7 +153,8 @@ class RichAnswersMixin:
     ) -> SendResult:
         """Send ``items`` in order. A rich part Telegram refuses is cut smaller and, failing that, sent as
         MarkdownV2 chunks; once rich messages are latched off, the rest go as MarkdownV2. A failure after
-        something landed is a partial delivery, resumable only when the failed item certainly did not go."""
+        something landed is a partial delivery, resumable only when the failed item certainly did not go.
+        Once a chunk had to leave a forum topic Telegram no longer has, the rich parts after it leave it too."""
         thread_id = self._metadata_thread_id(metadata)
         dm_topic = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
         error_types = self._telegram_error_types()
@@ -146,7 +172,7 @@ class RichAnswersMixin:
                         chat_id, text, index, reply_to, metadata, thread_id, thread_fallback, error_types)
                 except Exception as exc:
                     classified = self._classify_send_exception(exc, error_types)
-                    return self._partial(classified, items, delivered, tail_certain=classified.retryable,
+                    return self._partial(classified, items, delivered, tail_certain=self._certainly_unsent(exc),
                                          thread_fallback=thread_fallback)
                 if isinstance(outcome, SendResult):  # a definite non-delivery
                     return self._partial(outcome, items, delivered, thread_fallback=thread_fallback)
@@ -155,7 +181,8 @@ class RichAnswersMixin:
                 items.popleft()
                 continue
             anchor = reply_to if (dm_topic or self._should_thread_reply(reply_to, index)) else None
-            result = await self._try_send_rich(chat_id, text, anchor, metadata)
+            result = await self._try_send_rich(
+                chat_id, text, anchor, _without_thread(metadata) if thread_fallback else metadata)
             if result is None:
                 # Refused for good (limits counted otherwise, a parse error) or the endpoint is gone: not
                 # delivered, so sending it again in another form cannot duplicate it.
@@ -188,19 +215,21 @@ class RichAnswersMixin:
                  thread_fallback: bool = False) -> SendResult:
         """The harvested ``partial_overflow`` contract, with the unsent items for ``_resume_partial_send``.
 
-        Nothing delivered: the result is returned as it is, and a retry sends the whole answer again. A tail
-        that is not certainly undelivered is not attached, so nothing is resent (Hermes'
-        ``_resume_partial_send`` contract: resume only where non-delivery is certain)."""
-        if not delivered:
-            return result
+        A failed item that may have been shown marks the result ``ambiguous_delivery``: nothing sends it
+        again (``_send_retry_is_final``), and its tail is not attached for resuming (Hermes'
+        ``_resume_partial_send`` contract: resume only where non-delivery is certain). A certain failure
+        with nothing delivered leaves the base retry free to send the whole answer again."""
         raw = dict(result.raw_response) if isinstance(result.raw_response, dict) else {}
-        raw.update({
-            "partial_overflow": True, "delivered_chunks": len(delivered),
-            "total_chunks": len(delivered) + len(items), "last_message_id": delivered[-1],
-            "continuation_message_ids": tuple(delivered[1:]), "thread_fallback": thread_fallback})
-        if tail_certain and items:
-            raw["undelivered_rich_items"] = tuple(items)
-            raw["delivered_message_ids"] = tuple(delivered)
+        if not tail_certain:
+            raw["ambiguous_delivery"] = True
+        if delivered:
+            raw.update({
+                "partial_overflow": True, "delivered_chunks": len(delivered),
+                "total_chunks": len(delivered) + len(items), "last_message_id": delivered[-1],
+                "continuation_message_ids": tuple(delivered[1:]), "thread_fallback": thread_fallback})
+            if tail_certain and items:
+                raw["undelivered_rich_items"] = tuple(items)
+                raw["delivered_message_ids"] = tuple(delivered)
         result.raw_response = raw
         return result
 
@@ -216,7 +245,14 @@ class RichAnswersMixin:
         delivered = list(raw.get("delivered_message_ids") or ())
         async with self._chat_send_lock(chat_id):
             cooldown = self._send_flood_cooldown_remaining(chat_id)
+            thread_fallback = bool(raw.get("thread_fallback"))
             if cooldown is not None:
-                return self._partial(_flood_cap_result(cooldown), deque(items), delivered)
+                return self._partial(_flood_cap_result(cooldown), deque(items), delivered,
+                                     thread_fallback=thread_fallback)
             return await self._send_items(chat_id, deque(items), delivered, reply_to, metadata,
-                                          thread_fallback=bool(raw.get("thread_fallback")))
+                                          thread_fallback=thread_fallback)
+
+
+def _without_thread(metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """``metadata`` without the forum topic, as the harvested chunk sender drops it after a fallback."""
+    return {k: v for k, v in (metadata or {}).items() if k not in ("thread_id", "message_thread_id")}

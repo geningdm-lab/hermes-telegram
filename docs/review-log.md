@@ -87,3 +87,33 @@ Two findings are about streamed answers. Slice 3 rebuilds the streaming lifecycl
 ### Disputed in part
 
 **[P2] Protect code contents, not just their HTML tags.** `<code>`, `<pre>` and multi-line code spans are fixed. Not fixed: GFM indented code blocks (four spaces) are still treated as prose. The reason is that inside a list, the same indentation is an item's continuation (CommonMark), and the cut already gives that meaning to indented lines (`continues_item`). Telling the two apart needs a full CommonMark block parser. The agent writes fenced code, which the hint asks for. Reopen if live answers show an indented code block with escaped `$` or `<`.
+
+### Re-review of the fixes
+
+Review: Codex `gpt-6.2-astra`, effort `high`, the fix commits after `c2ab3c7` up to `1857b92`, 2026-11-25. Sixteen findings: fifteen accepted and fixed, one accepted in part. The reviewer agreed with moving the two streaming findings to slice 3, provided neither counts as row 1 coverage until slice 3 lands; they do not. On the indented-code dispute the reviewer showed that a top-level block indented four spaces after a blank line is unambiguous, so it is now handled and the dispute is closed.
+
+| Finding | Fix |
+|---|---|
+| [P1] An ambiguous first rich send lets the base retry send the whole answer again | a part that may have been shown marks the result `ambiguous_delivery`, and `_send_retry_is_final` returns it as it is; `checks/e2e/test_sender.py::test_a_one_part_answer_is_shown_exactly_once_whatever_the_connection_failure` |
+| [P2] A PTB flood wait given as a `timedelta` crashes the cooldown | counted in seconds before the cooldown and the result; `test_a_flood_wait_given_as_a_timedelta_is_waited_out_and_the_answer_completes` |
+| [P2] A part that never got a pooled connection is not resumed | `_certainly_unsent` counts PTB's pool timeout as not sent, and the result is retryable; the `pool` cases of the two connection-failure tests |
+| [P2] Rich parts after a topic fallback go to the deleted topic again; a resume in cooldown forgets the fallback | rich parts after the fallback leave the topic (`_without_thread`); the cooldown branch of `_resume_partial_send` keeps the flag; `test_after_leaving_a_deleted_forum_topic_the_rest_of_the_answer_still_goes_as_rich` |
+| [P2] A part falling back to MarkdownV2 shows the escapes preparation added (`List\<String>`) | `rich.plain_source` takes them out first; `test_a_part_falling_back_to_markdownv2_loses_only_the_escapes_preparation_added`, `test_a_part_sent_as_markdownv2_after_all_shows_the_agents_own_text` |
+| [P2] A one-line `$$` formula over the budget but within Telegram's limit is split | a line within Telegram's limit is kept whole; `test_a_line_over_the_budget_but_within_telegrams_limit_is_sent_whole` |
+| [P2] `\(...\)` inside an existing formula is rewritten | formulas are set aside before delimiters are converted; `test_preparation_leaves_formula_and_indented_code_source_alone` |
+| [P2] A large table header is dropped although the next row fits beside it | the header is repeated while it and the next row fit; `test_a_large_table_header_is_repeated_while_the_next_row_still_fits` |
+| [P2] Footnote definitions taken from code examples, and without their continuations | definitions come from prose only, with indented continuations; `test_footnote_definitions_come_from_prose_with_their_continuations` |
+| [P2] A definition does not fit beside its reference in an almost full part | the cut reserves room for the definitions a part needs; `test_the_cut_leaves_room_for_the_definitions_a_part_needs` |
+| [P2] The ordinary path unescapes `\$` inside `<code>` and `<pre>` | it uses the same verbatim regions as preparation; `test_ordinary_path_keeps_escapes_inside_html_code` |
+| [P2] Restoring masked spans rescans the answer once per span | one pass per nesting level; the review's case (16,000 code spans in 64 KB) takes 0.016 s, down from 0.9 s. No timing test, because timings are not stable across machines. |
+| [P2] Sender failures are tested against a scripted bot, not PTB | `checks/e2e/test_sender.py`: a real PTB `Bot` against the stand-in, with Bot API refusals from the stand-in and connection failures from httpx's own transport |
+| [P3] A code line longer than a message is preceded by an empty code block | the fence opener is carried to the first piece; `test_a_code_line_longer_than_a_message_keeps_its_fence_and_every_character` |
+| [P3] The stand-in's table check ignores fence length | a fence closes only with the same character, at least as long; `test_a_wide_table_shown_as_code_inside_a_longer_fence_is_not_refused` |
+
+#### Accepted in part
+
+**[P1] Apply the non-delivery check to MarkdownV2 fallback chunks.** Fixed in this plugin's sender. A fallback chunk that may have been shown is no longer queued for resuming, because `_certainly_unsent` decides that, not the classifier's `retryable`. The base retry no longer resends it either: the chunk is marked `ambiguous_delivery`.
+
+Not changed: the harvested chunk sender (`_send_chunk_with_retries`, hermes-agent@c419cf7 `plugins/platforms/telegram/adapter.py:3551`) retries a non-timeout `NetworkError` such as `httpx.ReadError` up to three times on its own. Every MarkdownV2 message goes through that helper, not just the fallback chunks of a rich answer. Changing it would change the bundled delivery policy for every ordinary message: after a dropped connection, the choice is between a possible duplicate and a possible loss. That decision belongs to the ordinary path as a whole, not to slice 1.
+
+Reopen in slice 3, which owns delivery failures and the failure message, or sooner if live use shows duplicated chunks after a network drop.
