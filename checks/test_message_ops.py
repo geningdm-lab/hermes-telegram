@@ -21,11 +21,15 @@ def adapter(tmp_path) -> HermesTelegramAdapter:
     return build_adapter(tmp_path)
 
 
-def _turn(adapter, thread_id: Any = None) -> Turn:
-    turn = Turn(session_key="s", chat_id=OWNER, thread_id=thread_id, inbound_message_id="40", profile="")
-    admitted = AdmittedTurn(chat_id=OWNER, thread_id=thread_id, message_id="40",
-                            metadata={"thread_id": thread_id} if thread_id else {})
+def _turn(adapter, thread_id: Any = None, *, inbound: str = "40", text: str | None = "here is the plan",
+          entities: list[dict[str, Any]] | None = None, profile: str = "") -> Turn:
+    """A turn the user's message ``inbound`` (``text`` with ``entities``) started."""
+    turn = Turn(session_key="s", chat_id=OWNER, thread_id=thread_id, inbound_message_id=inbound, profile=profile)
+    admitted = AdmittedTurn(chat_id=OWNER, thread_id=thread_id, message_id=inbound,
+                            metadata={"thread_id": thread_id} if thread_id else {}, text=text,
+                            entities=entities or [])
     adapter.admitted_turn = lambda t: admitted
+    adapter.admitted = admitted
     return turn
 
 
@@ -138,7 +142,35 @@ def _sent(adapter) -> dict[str, Any]:
 
 async def test_a_quote_replies_to_the_users_current_message_by_default(adapter):
     await _say(adapter, _turn(adapter), "That is the plan", quote="the plan")
-    assert _sent(adapter)["reply_parameters"] == {"message_id": 40, "quote": "the plan"}
+    assert _sent(adapter)["reply_parameters"] == {"message_id": 40, "quote": "the plan", "quote_position": 8}
+
+
+async def test_a_quote_carries_the_formatting_telegram_matches(adapter):
+    # Review slice 6, P2: Telegram matches a quote with its bold, italic and other entities.
+    text = "Meet at noon, not at 9"  # "noon" is bold, "Meet" italic (UTF-16 offsets)
+    entities = [{"type": "italic", "offset": 0, "length": 4}, {"type": "bold", "offset": 8, "length": 4},
+                {"type": "url", "offset": 8, "length": 4}]  # a URL entity is not part of a quote
+    await _say(adapter, _turn(adapter, text=text, entities=entities), "Noon it is", quote="at noon")
+    assert _sent(adapter)["reply_parameters"] == {
+        "message_id": 40, "quote": "at noon", "quote_position": 5,
+        "quote_entities": [{"type": "bold", "offset": 3, "length": 4}]}
+
+
+@pytest.mark.parametrize(("case", "why"), [
+    ("not in the message", "exact part of the user's message"),
+    ("a turn a tap started", "no message text"),  # Review slice 6, P2: its id is an event id, not a message
+    ("the bot's own message", "current message only"),  # its entities and rich blocks are not kept
+])
+async def test_a_quote_telegram_would_not_match_is_refused_before_anything_is_reserved(adapter, case, why):
+    mine = await adapter.send_single(OWNER, "the plan in full", None, {})
+    adapter.bot_stub.calls.clear()
+    turn = _turn(adapter, inbound="cb12", text=None) if case == "a turn a tap started" else _turn(adapter)
+    args = {"quote": "words never written"} if case == "not in the message" else {"quote": "the plan"}
+    if case == "the bot's own message":
+        args["reply_to"] = mine.message_id
+    with pytest.raises(TurnRefused, match=why):
+        await _say(adapter, turn, "About that", **args)
+    assert adapter.bot_stub.calls == [] and adapter.admitted.sent == 0
 
 
 async def test_a_reply_goes_to_one_of_the_bots_messages_in_this_conversation_only(adapter):
@@ -188,3 +220,128 @@ async def test_an_effect_telegram_has_no_name_for_or_outside_a_private_chat_is_r
 def test_reply_quote_preview_and_effect_need_a_text():
     with pytest.raises(TurnRefused, match="apply to a text"):
         tools._parse_extras({"files": ["/tmp/a.png"], "effect": "🎉"})
+
+
+# --- review of slice 6 -------------------------------------------------------------------------------------
+
+
+async def test_a_message_another_bot_sent_in_the_same_chat_is_not_this_bots(tmp_path):
+    # Review slice 6, P1: the profile's home kept, its bot replaced; the chat and the message ids repeat.
+    before = build_adapter(tmp_path, token="1:x")
+    sent = await before.send_single(OWNER, "from bot 1", None, {})
+    after = build_adapter(tmp_path, token="2:y")
+    with pytest.raises(TurnRefused, match="one of your messages"):
+        await _change(after, _turn(after), op="delete", message_id=sent.message_id)
+    assert after.bot_stub.calls == []
+
+
+async def test_a_media_send_that_fell_back_to_the_root_chat_is_not_in_the_topic(adapter):
+    # Review slice 6, P1: Hermes retries a DM-topic media send without its topic when the anchor is gone.
+    from gateway.platforms.base import MessageEvent, _thread_metadata_for_event
+
+    source = adapter.build_source(chat_id=OWNER, chat_type="dm", user_id=OWNER, thread_id="7", message_id="40")
+    metadata = dict(_thread_metadata_for_event(MessageEvent(text="hi", source=source, message_id="40")) or {})
+    adapter.bot_stub.fail["sendPoll"] = [BadRequest("Message to be replied not found")]
+    sent = await adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata)  # an answer's, not a tool's
+    assert adapter.bot_stub.of("sendPoll")[-1].get("message_thread_id") is None  # it landed in the root chat
+    with pytest.raises(TurnRefused, match="one of your messages"):
+        await _change(adapter, _turn(adapter, thread_id="7"), op="delete", message_id=sent.message_id)
+
+
+async def test_a_message_sent_for_another_profile_is_not_this_turns(tmp_path):
+    # Review slice 6, P1: the chat was routed to another profile since.
+    from types import SimpleNamespace
+
+    adapter = build_adapter(tmp_path)
+    sent = await adapter.send_single(OWNER, "for the owner", None, {})
+    adapter.gateway_runner = SimpleNamespace(
+        _profile_name_for_source=lambda source, adapter_profile=None: "family")
+    with pytest.raises(TurnRefused, match="one of your messages"):
+        await _change(adapter, _turn(adapter, profile="family"), op="delete", message_id=sent.message_id)
+
+
+async def test_a_message_recorded_before_kinds_existed_is_not_edited(adapter):
+    # Review slice 6, P1: slice 5 kept prompts as {"thread": ...} too; editing one would drop its approval buttons.
+    adapter._store("bot_messages", 4000).put(f"{OWNER}:77", {"thread": None, "bot": "1", "profile": ""})
+    with pytest.raises(TurnRefused, match="Only a text message you sent"):
+        await _change(adapter, _turn(adapter), op="edit", message_id="77", text="changed")
+    assert adapter.bot_stub.calls == []
+
+
+async def test_an_ordinary_message_is_edited_as_one_and_a_rich_one_as_rich(adapter):
+    # Review slice 6, P2: Telegram refuses a rich edit of an ordinary message.
+    from gateway import rich_sent_store
+
+    turn = _turn(adapter)
+    plain = await _say(adapter, turn, "Plain words")
+    table = "| a | b |\n|---|---|\n| 1 | 2 |"
+    out = await _change(adapter, turn, op="edit", message_id=plain["message_id"], text=table)
+    rich_one = await _say(adapter, turn, table)
+    await _change(adapter, turn, op="edit", message_id=rich_one["message_id"], text="| a | b |\n|---|---|\n| 3 | 4 |")
+    first, second = adapter.bot_stub.of("editMessageText")
+    assert "parse_mode" in first and "rich_message" not in first and "simplified" in out["note"]
+    assert "rich_message" in second
+    # Review slice 6, P2: a reply to the edited rich message gets its new text as context.
+    assert "3 | 4" in rich_sent_store.lookup(OWNER, rich_one["message_id"])
+
+
+async def test_an_edit_telegram_did_not_confirm_retires_the_old_choices(adapter):
+    # Review slice 6, P2: the new keyboard may be showing; the old taps must not reach the agent.
+    from telegram.error import TimedOut
+
+    turn = _turn(adapter)
+    sent = await _say(adapter, turn, "Pick", buttons=[{"label": "Paris", "value": "paris"}])
+    (old,) = _tokens(_sent(adapter))
+    adapter.bot_stub.fail["editMessageText"] = [TimedOut("read timed out")]
+    with pytest.raises(TurnRefused, match="may not have been applied"):
+        await _change(adapter, turn, op="edit", message_id=sent["message_id"], text="Pick again",
+                      buttons=[{"label": "Rome", "value": "rome"}])
+    (new,) = _tokens(adapter.bot_stub.of("editMessageText")[0])
+    shown = message(OWNER, sent["message_id"])
+    assert (await tap(adapter, OWNER, shown, old)).answers == [EXPIRED]
+    await tap(adapter, OWNER, shown, new)
+    assert len(adapter.received) == 1
+    await _change(adapter, turn, op="edit", message_id=sent["message_id"], text="Pick, last call")
+    assert _tokens(adapter.bot_stub.of("editMessageText")[-1]) == [new]  # the keyboard it may show, not the old
+
+
+async def test_a_deleted_messages_taps_widget_requests_and_votes_reach_nobody(adapter):
+    # Review slice 6, P2: an event already on its way when the message is deleted.
+    from types import SimpleNamespace
+
+    turn = _turn(adapter)
+    choice = await _say(adapter, turn, "Pick", buttons=[{"label": "Paris", "value": "paris"}])
+    (token,) = _tokens(_sent(adapter))
+    widget = await adapter.send_widget(OWNER, "<p>w</p>", {})
+    poll = await adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], {})
+    for message_id in (choice["message_id"], widget.message_id, poll.message_id):
+        await _change(adapter, turn, op="delete", message_id=message_id)
+    assert (await tap(adapter, OWNER, message(OWNER, choice["message_id"]), token)).answers == [EXPIRED]
+    await adapter._on_widget_query(SimpleNamespace(update_id=1, api_kwargs={"widget_query": {
+        "id": "wq-x", "from": {"id": int(OWNER), "is_bot": False, "first_name": "U"},
+        "chat": {"id": int(OWNER), "type": "private"}, "message_id": int(widget.message_id), "data": "next"}}), None)
+    await adapter._on_poll_answer(SimpleNamespace(update_id=2, poll_answer=SimpleNamespace(
+        poll_id=f"poll-{poll.message_id}", user=SimpleNamespace(id=int(OWNER), is_bot=False, full_name="U"),
+        option_ids=[0])), None)
+    assert adapter.received == []
+
+
+async def test_an_empty_button_list_removes_the_keyboard(adapter):
+    # Review slice 6, P2: "Voting closed" with buttons=[] must not leave the choices active.
+    turn = _turn(adapter)
+    sent = await _say(adapter, turn, "Vote", buttons=[{"label": "Yes", "value": "yes"}])
+    (token,) = _tokens(_sent(adapter))
+    await _change(adapter, turn, op="edit", message_id=sent["message_id"], text="Voting closed", buttons=[])
+    assert adapter.bot_stub.of("editMessageText")[0]["reply_markup"] == {"inline_keyboard": []}
+    assert (await tap(adapter, OWNER, message(OWNER, sent["message_id"]), token)).answers == [EXPIRED]
+
+
+async def test_an_effect_telegram_did_not_apply_is_reported_and_no_effect_is_refused(adapter):
+    # Review slice 6, P2.
+    with pytest.raises(TurnRefused, match="effect must be one of"):
+        tools._parse_extras({"text": "Done", "effect": "0"})  # the id of no effect
+    adapter.bot_stub.drop_effect = True
+    out = await _say(adapter, _turn(adapter), "Done!", effect="🎉")
+    assert out["sent"] and "without the effect" in out["note"]
+    adapter.bot_stub.drop_effect = False
+    assert "note" not in await _say(adapter, _turn(adapter), "Done again!", effect="🎉")

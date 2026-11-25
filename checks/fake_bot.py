@@ -29,6 +29,7 @@ class Bot:
         self.hold: dict[str, asyncio.Event] = {}
         self._ids = iter(range(900, 10_000))
         self.sticker_sets: dict[str, list[str]] = {}
+        self.drop_effect = False  # Telegram delivered a message without the effect asked for
 
     async def _call(self, method: str, kwargs: dict[str, Any]) -> int:
         self.calls.append((method, kwargs))
@@ -41,19 +42,29 @@ class Bot:
     def of(self, method: str) -> list[dict[str, Any]]:
         return [kwargs for name, kwargs in self.calls if name == method]
 
+    @staticmethod
+    def _topic(kwargs: dict[str, Any]) -> Any:
+        """The topic a sent message is in, as Telegram reports it (``Message.message_thread_id``)."""
+        return kwargs.get("message_thread_id") or kwargs.get("direct_messages_topic_id")
+
     async def send_poll(self, **kwargs: Any) -> Any:
         mid = await self._call("sendPoll", kwargs)
-        return SimpleNamespace(message_id=mid, poll=SimpleNamespace(id=f"poll-{mid}"))
+        return SimpleNamespace(message_id=mid, poll=SimpleNamespace(id=f"poll-{mid}"),
+                               message_thread_id=self._topic(kwargs))
 
     async def send_sticker(self, **kwargs: Any) -> Any:
         return SimpleNamespace(message_id=await self._call("sendSticker", kwargs))
 
     async def send_message(self, **kwargs: Any) -> Any:
         kwargs.update(kwargs.pop("api_kwargs", None) or {})  # what Telegram receives
-        return SimpleNamespace(message_id=await self._call("sendMessage", kwargs))
+        return SimpleNamespace(message_id=await self._call("sendMessage", kwargs), message_thread_id=self._topic(kwargs),
+                               effect_id=None if self.drop_effect else kwargs.get("message_effect_id"))
 
     async def do_api_request(self, method: str, api_kwargs: dict[str, Any]) -> Any:
-        return {"message_id": await self._call(method, api_kwargs)}
+        sent = {"message_id": await self._call(method, api_kwargs)}
+        if api_kwargs.get("message_effect_id") and not self.drop_effect:
+            sent["effect_id"] = api_kwargs["message_effect_id"]
+        return sent
 
     async def set_message_reaction(self, **kwargs: Any) -> bool:
         await self._call("setMessageReaction", kwargs)
@@ -82,8 +93,8 @@ class Bot:
             SimpleNamespace(file_id=fid, emoji="👍") for fid in self.sticker_sets[name]])
 
 
-def build_adapter(home, **extra: Any) -> HermesTelegramAdapter:
-    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token="1:x", extra={
+def build_adapter(home, token: str = "1:x", **extra: Any) -> HermesTelegramAdapter:
+    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token=token, extra={
         "allow_from": [OWNER, KID], **extra}))
     adapter._update_receipt_dir = home
     adapter._bot = adapter.bot_stub = Bot()
