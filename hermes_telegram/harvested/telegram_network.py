@@ -18,7 +18,7 @@ import httpx
 
 from agent.ssl_verify import platform_ssl_context
 
-logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
+logger = logging.getLogger("plugins.platforms.telegram.telegram_network")
 
 _TELEGRAM_API_HOST = "api.telegram.org"
 
