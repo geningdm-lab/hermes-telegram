@@ -173,7 +173,7 @@ Hermes forbids plugins to give the model a tool that lets it send messages on it
 
 | Tool | Does | Returns |
 |---|---|---|
-| `telegram_status(text)` | Sets the preview's status line; the default is `Contemplating...` | ok |
+| `telegram_status(text)` | Sets the preview's status line; the default is `Contemplating...` (slice 3) | whether a preview shows it |
 | `telegram_send(text?, files?, as_files?, buttons?, reply_to?)` | Sends one message now: a rich body, attachments (several photos go as one album, more than 10 as consecutive albums), buttons | message ids |
 | `telegram_widget(html, caption, height?)` | Sends a widget after checking its size, its compressed size and the sandbox rules (no network APIs, no external resources) | message id, or the reason it was refused |
 | `telegram_poll(question, options, quiz_answer?, multiple?)` | Sends a poll or a quiz | message id |
@@ -216,6 +216,17 @@ Any message the bot sends during a turn, such as an approval prompt or a cron re
 
 Drafts exist only in private chats. Groups and channels keep the typing indicator and the final answer; they are out of scope (PRD).
 
+How slice 3 does it (`hermes_telegram/preview.py`, `hermes_telegram/updates.py`):
+
+- Telegram delivers only the update kinds a bot asks for, and the harvested poller asked for python-telegram-bot 22.8's list, which predates the Stop button. `UpdateKindsMixin` overrides the polling and webhook start with copies that also ask for `stopped_message_generation`; a check holds each copy equal to the harvested method apart from that one argument.
+- `PreviewMixin` keeps one preview per private chat and topic, for the user's own message, from `on_processing_start` to `on_processing_complete`. A frame is the status in a `<tg-thinking>` block, then the partial answer prepared as a rich message, sent with `sendRichMessageDraft` and `can_stop` (a plain `sendMessageDraft` when Telegram refuses the rich frame). The frame is sent again every 20 s while the turn runs.
+- `send_draft` (the stream consumer's partial answer) updates the frame and always reports success: a frame Telegram did not take is shown by the next one, while a failure would switch the stream to edited messages.
+- The final: Hermes pauses typing right before it delivers a turn's final, on both the streamed and the plain path, so a paused chat's preview is not shown again. Any other message the bot sends during the turn (a cron report, a tool's file, a notice, a part the stream sealed) shows the preview again 1 s later. An approval or clarify prompt also pauses typing but is never the final: the preview comes back under it.
+- Stop: the update's chat and topic find the preview; the adapter dispatches `/stop` as the user who wrote the message, through `handle_message`, which sends Hermes' "Stopped" reply and then cancels the turn (`_dispatch_active_session_command`). The preview stops changing at once. Hermes' stream consumer drops a draft's partial text on cancel (`stream_consumer._on_cancelled`), so the adapter sends that text itself, after "Stopped".
+- Failure: Hermes' failure reply is the turn's final; Hermes also shows its own diagnostic line ("❌ ... rejected the request ...") unless the profile sets `display.suppress_warning_notifications`. That line is Hermes' setting, not this plugin's message: for row 10's acceptance run the profile should suppress it, or the check counts it apart.
+- A long answer streaming past the rich overflow limit: the stream consumer cuts it with the adapter's `truncate_message`, which now cuts a rich answer as `rich.split_markdown` does, and the heads it seals (never edited afterwards) go as rich messages, recognised by their text.
+- `telegram_status(text)` sets the status line of the turn's preview; it sends no message and does not count towards the cap.
+
 ## Testing
 
 - Unit tests cover pure logic: Markdown splitting within Telegram's limits, payload builders, widget validation, button tokens.
@@ -230,7 +241,7 @@ Each slice is one PR to `main`, reviewed by the owner.
 0. Skeleton and parity. The plugin loads as `telegram` and shadows the bundled copy. Harvested transport, authorization, routing and Hermes' own button flows work. The integration harness exists. Checked by: harvested code equal to upstream member by member, the registration equal to the bundled one, Hermes' plugin discovery picking this plugin, and Hermes' Telegram contract suite against it. Clarify, cron delivery and the `family` route have no scenario in that suite. Their code is harvested unchanged, so they get end-to-end checks in the slices that change the paths they use (3 and 4).
 1. Rich answers: rows 1, 2, 16.
 2. Files: rows 3, 4, 5, 15, and the cause of today's failed sends.
-3. Lifecycle: rows 6 to 10, 17, and streamed answers as rich messages: block-aware heads while a long answer streams, and a rich final in parts where the gateway edits a preview.
+3. Lifecycle: rows 6 to 10, 17, and streamed answers as rich messages: block-aware heads while a long answer streams. A final the gateway edits into a preview happens only where there are no drafts, in groups, which are out of scope. Clarify gets its end-to-end check here, as it uses the prompt sender this slice wraps; a cron report during a preview is checked at the adapter, since it is an ordinary send. The `family` route is checked in slice 4, which routes taps.
 4. Buttons, polls, reactions, stickers and their events: row 11.
 5. Widgets: rows 12 to 14.
 6. The rest of the agent surface: effects, pins, edits, link previews, quote replies.
