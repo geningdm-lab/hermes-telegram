@@ -1,8 +1,7 @@
 """Taps, votes and reactions coming back, and the tools' own sends (hermes_telegram/buttons.py, actions.py,
 turn.py, tools.py), on the composed adapter with a recording stand-in for the Bot API client.
 
-The stores are the real ones under a temporary Hermes home; what a test asserts is what the agent received
-(``handle_message``) and what Telegram was asked to do (the bot's calls).
+The fake bot and the adapter come from checks/fake_bot.py.
 """
 
 import asyncio
@@ -12,7 +11,7 @@ from typing import Any
 import pytest
 from telegram.error import BadRequest, TimedOut
 
-from gateway.config import PlatformConfig
+from checks.fake_bot import KID, OWNER, STRANGER, build_adapter, user
 from gateway.platforms.base import MessageEvent, SendResult, _thread_metadata_for_event
 from hermes_telegram import tools
 from hermes_telegram.adapter import HermesTelegramAdapter
@@ -20,75 +19,9 @@ from hermes_telegram.buttons import ALREADY_ANSWERED, EXPIRED, PREFIX
 from hermes_telegram.delivery import DELIVERED_IDS
 from hermes_telegram.turn import AdmittedTurn, Turn, TurnRefused, as_tool_send
 
-OWNER, KID, STRANGER = "111", "222", "333"
-
-
-class Bot:
-    """The Bot API client: records every call; ``fail[method]`` raises its errors in order, ``hold[method]``
-    keeps the call open until the test sets the event."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.fail: dict[str, list[Exception]] = {}
-        self.hold: dict[str, asyncio.Event] = {}
-        self._ids = iter(range(900, 10_000))
-        self.sticker_sets: dict[str, list[str]] = {}
-
-    async def _call(self, method: str, kwargs: dict[str, Any]) -> int:
-        self.calls.append((method, kwargs))
-        if method in self.hold:
-            await self.hold[method].wait()
-        if self.fail.get(method):
-            raise self.fail[method].pop(0)
-        return next(self._ids)
-
-    def of(self, method: str) -> list[dict[str, Any]]:
-        return [kwargs for name, kwargs in self.calls if name == method]
-
-    async def send_poll(self, **kwargs: Any) -> Any:
-        mid = await self._call("sendPoll", kwargs)
-        return SimpleNamespace(message_id=mid, poll=SimpleNamespace(id=f"poll-{mid}"))
-
-    async def send_sticker(self, **kwargs: Any) -> Any:
-        return SimpleNamespace(message_id=await self._call("sendSticker", kwargs))
-
-    async def send_message(self, **kwargs: Any) -> Any:
-        kwargs.update(kwargs.pop("api_kwargs", None) or {})  # what Telegram receives
-        return SimpleNamespace(message_id=await self._call("sendMessage", kwargs))
-
-    async def do_api_request(self, method: str, api_kwargs: dict[str, Any]) -> Any:
-        return {"message_id": await self._call(method, api_kwargs)}
-
-    async def set_message_reaction(self, **kwargs: Any) -> bool:
-        await self._call("setMessageReaction", kwargs)
-        return True
-
-    async def get_sticker_set(self, name: str) -> Any:
-        await self._call("getStickerSet", {"name": name})
-        return SimpleNamespace(name=name, title=name.title(), stickers=[
-            SimpleNamespace(file_id=fid, emoji="👍") for fid in self.sticker_sets[name]])
-
-
-def _adapter(home, **extra: Any) -> HermesTelegramAdapter:
-    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token="1:x", extra={
-        "allow_from": [OWNER, KID], **extra}))
-    adapter._update_receipt_dir = home
-    adapter._bot = adapter.bot_stub = Bot()
-    adapter.received = []
-
-    async def handle_message(event: MessageEvent) -> None:
-        adapter.received.append(event)
-    adapter.handle_message = handle_message
-    return adapter
-
-
 @pytest.fixture
 def adapter(tmp_path) -> HermesTelegramAdapter:
-    return _adapter(tmp_path)
-
-
-def _user(user_id: str) -> Any:
-    return SimpleNamespace(id=int(user_id), is_bot=False, full_name=f"User {user_id}", first_name="User")
+    return build_adapter(tmp_path)
 
 
 def _message(chat_id: str, message_id: Any, thread_id: Any = None, chat_type: str = "private") -> Any:
@@ -111,7 +44,7 @@ _queries = iter(range(1, 10_000))
 
 
 async def _tap(adapter, user_id: str, message: Any, token: str, *, answer_fails: bool = False) -> Query:
-    query = Query(id=str(next(_queries)), data=PREFIX + token, from_user=_user(user_id), message=message,
+    query = Query(id=str(next(_queries)), data=PREFIX + token, from_user=user(user_id), message=message,
                   answers=[], answer_fails=answer_fails)
     await adapter._handle_callback_query(SimpleNamespace(callback_query=query), None)
     return query
@@ -187,7 +120,7 @@ async def test_a_tap_whose_hand_off_fails_leaves_the_set_open(adapter):
 async def test_a_tap_is_routed_by_the_user_who_tapped_with_the_topics_skill_and_prompt(tmp_path):
     # docs/design.md, Events: a tap by the routed family user reaches the family profile, in its topic, with
     # what a text there gets (review slice 4, P2: the topic's skill and prompt).
-    adapter = _adapter(tmp_path, channel_prompts={"7": "Answer as the travel planner."})
+    adapter = build_adapter(tmp_path, channel_prompts={"7": "Answer as the travel planner."})
     adapter.gateway_runner = SimpleNamespace(
         _profile_name_for_source=lambda source, adapter_profile=None: "family" if source.user_id == KID else None)
     adapter._dm_topics[f"{KID}:Trips"] = 7
@@ -204,7 +137,7 @@ async def test_a_tap_is_routed_by_the_user_who_tapped_with_the_topics_skill_and_
 
 async def test_a_set_the_owner_sent_does_not_take_a_tap_routed_to_another_profile(tmp_path):
     # Review slice 4, P1: on a shared bot a set belongs to the profile that sent it.
-    adapter = _adapter(tmp_path)
+    adapter = build_adapter(tmp_path)
     adapter.gateway_runner = SimpleNamespace(
         _profile_name_for_source=lambda source, adapter_profile=None: "family")
     paris, = _offer(adapter, OWNER, 5, ["Paris"], profile="")
@@ -217,7 +150,7 @@ async def test_a_set_the_owner_sent_does_not_take_a_tap_routed_to_another_profil
 
 def _vote(update_id: int, poll_id: str, user_id: str, options: list[int]) -> Any:
     return SimpleNamespace(update_id=update_id, poll_answer=SimpleNamespace(
-        poll_id=poll_id, user=_user(user_id), option_ids=options))
+        poll_id=poll_id, user=user(user_id), option_ids=options))
 
 
 async def test_a_vote_that_arrives_before_sendpoll_returns_reaches_the_agent(adapter):
@@ -243,16 +176,16 @@ async def test_a_vote_by_a_user_the_adapter_does_not_admit_reaches_nobody(adapte
 def _reaction(update_id: int, chat_id: str, message_id: Any, user_id: str, emoji: str,
               chat_type: str = "private") -> Any:
     return SimpleNamespace(update_id=update_id, message_reaction=SimpleNamespace(
-        chat=SimpleNamespace(id=int(chat_id), type=chat_type), message_id=int(message_id), user=_user(user_id),
+        chat=SimpleNamespace(id=int(chat_id), type=chat_type), message_id=int(message_id), user=user(user_id),
         old_reaction=(), new_reaction=(SimpleNamespace(emoji=emoji),)))
 
 
 async def test_a_reaction_in_a_topic_reaches_that_topic_after_a_restart(tmp_path):
     # Review slice 4, P1: Telegram's reaction update has no topic; the index the bot kept at send time does.
-    before = _adapter(tmp_path)
+    before = build_adapter(tmp_path)
     metadata = {"thread_id": "7"}
     sent = await before.send_single(OWNER, "Here is the plan", None, metadata)
-    after = _adapter(tmp_path)  # a new gateway process
+    after = build_adapter(tmp_path)  # a new gateway process
     await after._on_message_reaction(_reaction(1, OWNER, sent.message_id, OWNER, "🔥"), None)
     (event,) = after.received
     assert (event.text, event.source.thread_id) == (f"[reaction] 🔥 on message {sent.message_id}", "7")
@@ -353,7 +286,7 @@ async def test_the_agent_reacts_only_in_its_own_conversation(adapter):
 
 async def test_a_tool_text_longer_than_one_message_is_refused_unsent(tmp_path):
     # Review slice 4, P1: the cap reserves one message for the text, so the text must be one message.
-    adapter = _adapter(tmp_path, rich_messages=False)
+    adapter = build_adapter(tmp_path, rich_messages=False)
     result = await adapter.send_single(OWNER, "word " * 1000, None, {})
     assert not result.success and "too long for one message" in result.error
     assert adapter.bot_stub.calls == []
@@ -366,7 +299,7 @@ async def test_a_tool_text_longer_than_one_message_is_refused_unsent(tmp_path):
 ])
 async def test_a_tool_message_with_buttons_is_rich_exactly_when_an_answer_would_be(tmp_path, extra, text, expected):
     # Review slice 4, P1: the same checks as the answer path, the keyboard kept either way.
-    adapter = _adapter(tmp_path, **extra)
+    adapter = build_adapter(tmp_path, **extra)
     markup, _ = adapter.button_markup(OWNER, [{"label": "A", "value": "a"}], single_use=True)
     assert (await adapter.send_single(OWNER, text, markup, {})).success
     ((method, kwargs),) = adapter.bot_stub.calls
@@ -403,7 +336,7 @@ async def test_a_sticker_set_telegram_failed_to_return_is_asked_for_again_later(
     # Review slice 4, P2: a flood wait on the first lookup must not hide the set until a restart.
     from hermes_telegram import actions
 
-    adapter = _adapter(tmp_path, sticker_sets=["cats"])
+    adapter = build_adapter(tmp_path, sticker_sets=["cats"])
     adapter.bot_stub.sticker_sets = {"cats": ["cat-1"]}
     adapter.bot_stub.fail["getStickerSet"] = [TimedOut("flood")]
     assert await adapter.sticker_catalog() == []

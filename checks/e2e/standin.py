@@ -272,10 +272,23 @@ class MediaTelegramStandin(RichTelegramStandin):
         if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
             raise BotApiError("Bad Request: INPUT_MEDIA_WIDGET_TOO_LARGE")
         for key in ("chat_data", "public_data"):
-            if len(str(p.get(key) or "").encode("utf-8")) > 1024:
-                raise BotApiError(f"Bad Request: {key} is too long")
+            self._check_widget_data(p, key)
         widget = {"html": html, **{k: p[k] for k in ("height", "width", "chat_data", "public_data") if k in p}}
-        return self._bot_message(p, _kind="widget", caption=p.get("caption", ""), widget=widget)
+        if "height" in p and not 50 <= int(p["height"]) <= 600:
+            raise BotApiError("Bad Request: widget height must be 50-600")
+        msg = self._bot_message(p, _kind="widget", caption=p.get("caption", ""), widget=widget)
+        with self._lock:
+            self._visible[(str(p["chat_id"]), str(msg["message_id"]))].extra["chat_data"] = p.get("chat_data", "")
+        return msg
+
+    @staticmethod
+    def _check_widget_data(p: dict[str, Any], key: str) -> None:
+        """bots/widgets, Limits: a state is UTF-8 text without NUL, at most 1024 bytes."""
+        value = str(p.get(key) or "")
+        if "\x00" in value:
+            raise BotApiError(f"Bad Request: {key} must not contain NUL")
+        if len(value.encode("utf-8")) > 1024:
+            raise BotApiError(f"Bad Request: {key} is too long")
 
     def _m_answerWidgetQuery(self, p: dict[str, Any]) -> bool:
         if len(str(p.get("data") or "").encode("utf-8")) > 1024:
@@ -287,6 +300,9 @@ class MediaTelegramStandin(RichTelegramStandin):
             vis = self._visible.get((str(p["chat_id"]), str(p["message_id"])))
             if vis is None or vis.extra.get("kind") != "widget":
                 raise BotApiError("Bad Request: message is not a widget")
+            self._check_widget_data(p, "chat_data")
+            if vis.extra.get("chat_data", "") == p.get("chat_data", ""):
+                raise BotApiError("Bad Request: message is not modified")  # as Telegram says (bots/widgets)
             vis.extra["chat_data"] = p.get("chat_data")
         return True
 

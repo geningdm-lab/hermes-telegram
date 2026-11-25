@@ -386,12 +386,14 @@ WIDGET_SCHEMA: dict[str, Any] = {
         "files do not work. Interaction inside it (tabs, steps, toggles) stays on the device. For an action "
         "that needs you, the script calls TelegramWidget.request(data) with up to 64 bytes, and you receive "
         "[widget] data=\"<data>\" on widget <id>; answer with a message, or with new widget state through "
-        "telegram_message. state is the widget's initial TelegramWidget.chatData (up to 1024 bytes). Private "
-        "chats only. Counts as one extra message."),
+        "telegram_message. Every request reaches you as a new message, so call request on the user's action, "
+        "never on a timer. state is the widget's initial TelegramWidget.chatData (up to 1024 bytes). height "
+        "is 50 to 600 pixels, or 0 (the default) for the content's own height. Private chats only. Counts as "
+        "one extra message."),
     "parameters": {"type": "object", "properties": {
         "html": {"type": "string"},
         "caption": {"type": "string", "maxLength": 1024},
-        "height": {"type": "integer", "minimum": 50, "maximum": 600},
+        "height": {"type": "integer", "minimum": 0, "maximum": 600},
         "state": {"type": "string", "maxLength": 1024},
     }, "required": ["html"]},
 }
@@ -399,53 +401,55 @@ WIDGET_SCHEMA: dict[str, Any] = {
 MESSAGE_SCHEMA: dict[str, Any] = {
     "name": "telegram_message",
     "description": (
-        "Change one of your messages in this Telegram chat. op=widget_state sets a widget's state "
-        "(TelegramWidget.chatData, up to 1024 bytes); the widget redraws from it."),
+        "Change one of your messages in this Telegram conversation. op=widget_state sets a widget's state "
+        "(TelegramWidget.chatData, up to 1024 bytes); the widget redraws from it. \"\" removes the state."),
     "parameters": {"type": "object", "properties": {
         "op": {"type": "string", "enum": ["widget_state"]},
         "message_id": {"type": "string"},
         "state": {"type": "string", "maxLength": 1024},
-    }, "required": ["op", "message_id"]},
+    }, "required": ["op", "message_id", "state"]},
 }
 
 
 async def _send_widget(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, Any]:
-    from .widgets import DATA_MAX, check_widget
+    from .widgets import check_state, check_widget
 
     html = args.get("html")
     if not isinstance(html, str):
         raise TurnRefused("html must be a string.")
-    why = check_widget(html)
+    why = check_widget(html) or check_state(args.get("state", ""))
     if why:
         raise TurnRefused(f"The widget was not sent: {why}.")
-    state = args.get("state") or ""
-    if not isinstance(state, str) or len(state.encode("utf-8")) > DATA_MAX:
-        raise TurnRefused(f"state must be a string of at most {DATA_MAX} bytes.")
-    height = args.get("height")
-    if height is not None and (not isinstance(height, int) or not 50 <= height <= 600):
-        raise TurnRefused("height must be 50 to 600 pixels.")
+    height = args.get("height") or 0
+    if not isinstance(height, int) or not (height == 0 or 50 <= height <= 600):
+        raise TurnRefused("height must be 50 to 600 pixels, or 0 for the content's own height.")
     admitted = adapter.admitted_turn(turn)
     admitted.take(1)
     result = await adapter.send_widget(turn.chat_id, html, admitted.metadata, caption=str(args.get("caption") or ""),
-                                       height=height, state=state)
-    if not result.success:
-        admitted.give_back(1)
-        raise TurnRefused(f"The widget was not sent: {result.error}")
-    return {"sent": True, "message_id": result.message_id}
+                                       height=height or None, state=args.get("state", ""), profile=turn.profile)
+    out = _sent_or_refused(admitted, result, "widget")
+    if isinstance(result.raw_response, dict) and result.raw_response.get("unrecorded"):
+        out["note"] = "The widget could not be recorded: its requests will not reach you."
+    return out
 
 
 async def _change_message(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, Any]:
-    from .widgets import DATA_MAX
+    from .widgets import check_state
 
     adapter.admitted_turn(turn)
-    message_id, state = str(args.get("message_id") or ""), args.get("state") or ""
+    message_id = str(args.get("message_id") or "")
     if args.get("op") != "widget_state" or not message_id.isdigit():
         raise TurnRefused("op must be widget_state, with the widget's message_id.")
-    if not isinstance(state, str) or len(state.encode("utf-8")) > DATA_MAX:
-        raise TurnRefused(f"state must be a string of at most {DATA_MAX} bytes.")
-    if not adapter._is_bot_message(turn.chat_id, message_id):
-        raise TurnRefused("That is not one of your messages in this chat.")
-    result = await adapter.set_widget_state(turn.chat_id, message_id, state)
+    if "state" not in args:
+        raise TurnRefused("state is required: the widget's new state, or \"\" to remove it.")
+    why = check_state(args["state"])
+    if why:
+        raise TurnRefused(f"The widget's state was not changed: {why}.")
+    widget = adapter._widget(turn.chat_id, message_id)
+    if (widget is None or (widget.get("thread") or None) != (turn.thread_id or None)
+            or (widget.get("profile") or "") != (turn.profile or "")):
+        raise TurnRefused("That is not one of your widgets in this conversation.")
+    result = await adapter.set_widget_state(turn.chat_id, message_id, args["state"])
     if not result.success:
         raise TurnRefused(f"The widget's state was not changed: {result.error}")
     return {"changed": True, "message_id": message_id}

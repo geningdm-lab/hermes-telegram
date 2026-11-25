@@ -45,9 +45,9 @@ def test_a_diagram_goes_as_a_widget_and_its_request_reaches_the_agent_which_upda
                                        {"op": "widget_state", "message_id": widget_id, "state": "step 2"}),
                         C.answer("A-wg-act", "moved on"))
     pushed = time.monotonic()
-    rig.drv.standin.widget_query(int(rig.drv.user_id), inbound.chat_id, int(widget_id), f"next [in:{act}]")
-    answered = wait_until(lambda: next((c for c in rig.drv.standin.calls_of("answerWidgetQuery") if not c.faulted),
-                                       None), "the widget's request answered", timeout=15, on_timeout=rig.ctx)
+    query = rig.drv.standin.widget_query(int(rig.drv.user_id), inbound.chat_id, int(widget_id), f"next [in:{act}]")
+    (answered,) = wait_until(lambda: _answers(rig, [query]), "the widget's request answered", timeout=15,
+                             on_timeout=rig.ctx)
     assert answered.at - pushed < 5.0  # Telegram allows 15 s; the agent's turn takes longer
     C.wait_reply(rig, inbound.chat_id, "A-wg-act", "the agent's answer to the widget")
     assert _texts_sent(rig, act)[0] == f'[widget] data="next [in:{act}]" on widget {widget_id}'
@@ -55,20 +55,28 @@ def test_a_diagram_goes_as_a_widget_and_its_request_reaches_the_agent_which_upda
     assert (str(state.params["message_id"]), state.params["chat_data"]) == (widget_id, "step 2")
 
 
-def test_a_request_the_widget_repeats_in_the_background_reaches_the_agent_once(rig):
-    offer, act = "wg-offer2", "wg-repeat"
-    rig.director.script(offer, tool_call(rig, "wgs2", "telegram_widget", {"html": _diagram(f"refresh [in:{act}]")}),
+def _answers(rig, queries: list[dict]) -> list:
+    """The successful answerWidgetQuery calls for these queries: one each, or nothing yet."""
+    ids = [q["widget_query"]["id"] for q in queries]
+    calls = [c for c in rig.drv.standin.calls_of("answerWidgetQuery")
+             if not c.faulted and str(c.params.get("widget_query_id")) in ids]
+    return calls if sorted(str(c.params["widget_query_id"]) for c in calls) == sorted(ids) else []
+
+
+def test_two_presses_with_the_same_data_reach_the_agent_twice_each_answered_once(rig):
+    # Review slice 5, P1: pressing "next" twice is two moves, not a background refresh to drop.
+    offer, act = "wg-offer2", "wg-twice"
+    rig.director.script(offer, tool_call(rig, "wgs2", "telegram_widget", {"html": _diagram(f"next [in:{act}]")}),
                         C.answer("A-wg-offer2", "drawn"))
-    rig.director.script(act, C.answer("A-wg-repeat", "refreshed"))
+    rig.director.script(act, C.answer("A-wg-twice-1", "step 2"), C.answer("A-wg-twice-2", "step 3"))
     inbound = rig.drv.dm(f"draw it [in:{offer}]")
     C.wait_reply(rig, inbound.chat_id, "A-wg-offer2")
     widget_id = int([c for c in rig.drv.standin.calls_of("sendWidget") if not c.faulted][-1].response["message_id"])
-    for _ in range(2):  # a widget may ask every 5 s while it is on screen
-        rig.drv.standin.widget_query(int(rig.drv.user_id), inbound.chat_id, widget_id, f"refresh [in:{act}]")
-    C.wait_reply(rig, inbound.chat_id, "A-wg-repeat")
-    time.sleep(3.0)
-    assert C.turns(rig, act) == 1
-    assert len([c for c in rig.drv.standin.calls_of("answerWidgetQuery") if not c.faulted]) >= 2  # every one answered
+    queries = [rig.drv.standin.widget_query(int(rig.drv.user_id), inbound.chat_id, widget_id, f"next [in:{act}]")
+               for _ in range(2)]
+    C.wait_reply(rig, inbound.chat_id, "A-wg-twice-2", "the agent's answer to the second press")
+    assert C.turns(rig, act) == 2
+    assert len(_answers(rig, queries)) == 2  # every query answered, none twice
 
 
 def test_a_widget_that_needs_the_network_is_refused_before_it_is_sent(rig):
