@@ -1,0 +1,53 @@
+[project]
+name = "hermes-telegram"
+version = "0.0.0"
+description = "Telegram platform plugin for Hermes Agent with the full Bot API presentation surface"
+requires-python = ">=3.14,<3.15"
+license = "MIT"
+# No runtime dependencies of its own: the plugin runs inside the Hermes gateway process and uses
+# the packages Hermes ships (python-telegram-bot, httpx, pydantic). See docs/design.md, Transport.
+dependencies = []
+
+[dependency-groups]
+dev = [
+  # The Hermes commit homelab deploys, with its Telegram extra (python-telegram-bot 22.8).
+  "hermes-agent[telegram] @ git+https://github.com/NousResearch/hermes-agent.git@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee",
+  # Test pins follow Hermes' own dev group at that commit.
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  # The fake Bot API server in tests.
+  "aiohttp==3.14.5",
+]
+
+[tool.uv]
+package = false
+# Mirrors [tool.uv] of hermes-agent@c419cf7 (pyproject.toml): Hermes resolves only on 3.14 and
+# overrides these pins of its own dependencies. Without them its requirements do not resolve.
+# Update together with the Hermes pin above.
+environments = ["python_version >= '3.14'"]
+override-dependencies = [
+  "pynacl>=1.6,<1.7",
+  "cryptography==50.0.2",
+  "Pillow==13.0.0",
+  "spacy-curated-transformers; sys_platform == 'never'",
+]
+# Hermes' setup.py refuses to build a wheel unless HERMES_NIX_BUILD=1, which its Nix derivation
+# sets; the host runs that Nix build, so the test environment builds the same way.
+extra-build-variables = { hermes-agent = { HERMES_NIX_BUILD = "1" } }
+
+[tool.pytest.ini_options]
+testpaths = ["checks"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--import-mode=importlib"
+# The repository root, so tests import hermes_telegram as the package it is.
+pythonpath = ["."]
+markers = [
+  "e2e: drives a real Hermes gateway child against a Bot API stand-in (slow)",
+  "spawns_gateway_lookalike: Hermes' own mark on the contract module this suite imports",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+extend-exclude = ["hermes_telegram/harvested"]
