@@ -250,6 +250,7 @@ Deferred by the owner, 2026-11-25:
 Open, asked by push on 2026-11-25:
 
 5. Should the `telegram` tools be listed to the model directly (`tools.tool_search.defer` or a direct-surface entry), instead of behind the tool search bridge? Direct listing costs their schemas in every prompt; the bridge costs a lookup before the first call. Slice 2 keeps Hermes' default, the bridge.
+6. When Telegram's reply to a final answer is lost, so it is unknown whether the user saw it, Hermes' delivery ledger resends it later with a "may be a duplicate" marker. Keep that (a possible marked duplicate), or drop it (a possible lost answer)? Slice 2 keeps Hermes' policy and removed only the unmarked immediate retry (docs/review-log.md, slice 2, disputed).
 
 ## Out of scope
 
