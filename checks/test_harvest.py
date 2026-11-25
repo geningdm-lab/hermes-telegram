@@ -47,8 +47,14 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "send_video": "FilesMixin",
     "send_voice": "FilesMixin",
     "_send_media": "FilesMixin",
-    "on_processing_start": "HumanTurnsMixin",
-    "on_processing_complete": "HumanTurnsMixin",
+    # Slice 3, hermes_telegram/preview.py (the hooks chain on to HumanTurnsMixin's).
+    "on_processing_start": "PreviewMixin",
+    "on_processing_complete": "PreviewMixin",
+    "send": "PreviewMixin",
+    "send_draft": "PreviewMixin",
+    "_send_prompt": "PreviewMixin",
+    "_send_with_dm_topic_reply_anchor_retry": "PreviewMixin",
+    "_register_handlers": "PreviewMixin",
     # Slice 3, hermes_telegram/updates.py: copies with one argument changed (test below).
     "_start_polling_once": "UpdateKindsMixin",
     "_start_webhook_mode": "UpdateKindsMixin",

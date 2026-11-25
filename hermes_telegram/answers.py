@@ -12,8 +12,9 @@ harvested path; slice 3 owns it (docs/review-log.md, slice 1).
 
 import asyncio
 import contextvars
+import hashlib
 import re
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -31,6 +32,13 @@ Item = tuple[str, str, int]
 _MAX_RESPLITS = 2
 # Below this a refused part is not cut further: it goes as MarkdownV2 chunks.
 _MIN_PART_CHARS = 1000
+_SEALED_MEMORY = 64  # heads of streamed answers the consumer is about to send
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.strip().encode()).hexdigest()
+
+
 # Set while _send_items sends a MarkdownV2 chunk of a rich answer (see _send_chunk_markdown_or_plain).
 _FALLBACK_CHUNK: contextvars.ContextVar[bool] = contextvars.ContextVar("hermes_telegram_fallback_chunk",
                                                                       default=False)
@@ -87,6 +95,36 @@ class RichAnswersMixin:
     @staticmethod
     def _rich_parts(prepared: str) -> list[str]:
         return rich.split_markdown(prepared)
+
+    def truncate_message(self, content: str, max_length: int = 4096, len_fn: Any = None) -> list[str]:
+        """Above an ordinary message's length only Hermes' stream consumer cuts (``_split_first_send``, at
+        the rich overflow limit): a rich answer streaming past it is cut where ``rich.split_markdown`` cuts,
+        keeping code, tables and formulas whole, instead of by the ordinary truncator. The parts are prepared
+        Markdown, which the sender prepares again unchanged (``prepare_markdown`` is idempotent)."""
+        if max_length > self.MAX_MESSAGE_LENGTH and self._rich_eligible_any_length(content):
+            parts = rich.split_markdown(rich.prepare_markdown(content), char_budget=min(max_length, rich.CHAR_BUDGET))
+            self._remember_sealed_heads(parts[:-1])
+            return parts
+        return super().truncate_message(content, max_length, len_fn=len_fn)
+
+    def _sealed_heads(self) -> "OrderedDict[str, None]":
+        return self.__dict__.setdefault("_hermes_telegram_sealed_heads", OrderedDict())
+
+    def _remember_sealed_heads(self, heads: list[str]) -> None:
+        """The heads the stream consumer will send next. It never edits them (``_split_first_send`` drops
+        their message id) though it sends them with ``expect_edits``; ``_send_text_locked`` knows them by
+        their text, as the consumer cleans it for display, and sends them as rich messages."""
+        try:
+            from gateway.stream_consumer import GatewayStreamConsumer
+            clean = GatewayStreamConsumer._clean_for_display
+        except Exception:
+            clean = None
+        sealed = self._sealed_heads()
+        for head in heads:
+            for text in {head, clean(head) if clean else head}:
+                sealed[_digest(text)] = None
+        while len(sealed) > _SEALED_MEMORY:
+            sealed.popitem(last=False)
 
     def _certainly_unsent(self, exc: BaseException) -> bool:
         """Telegram certainly did not show the message: it refused it with a flood wait, or the request never
@@ -151,6 +189,10 @@ class RichAnswersMixin:
             self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]
     ) -> SendResult:
         """Every rich answer goes through ``_send_items``; everything else takes the harvested path."""
+        sealed = self._sealed_heads()
+        if (metadata or {}).get("expect_edits") and _digest(content) in sealed:
+            del sealed[_digest(content)]
+            metadata = {k: v for k, v in (metadata or {}).items() if k != "expect_edits"}
         if (metadata or {}).get("expect_edits") or not self._rich_eligible_any_length(content):
             return await super()._send_text_locked(chat_id, content, reply_to, metadata)
         thread_id = self._metadata_thread_id(metadata)
