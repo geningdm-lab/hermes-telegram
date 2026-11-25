@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .delivery import Receipt, album_chunks, collecting_notices, combined_notice
-from .turn import AdmittedTurn, Turn, TurnRefused, live_adapter, on_gateway_loop
+from .turn import AdmittedTurn, Turn, TurnRefused, as_tool_send, live_adapter, on_gateway_loop
 
 TOOLSET = "telegram"
 MAX_FILES = 20
@@ -26,6 +26,12 @@ MAX_BUTTONS = 12
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".3gp"}
 _VOICE_EXTS = {".ogg", ".opus"}
+MAYBE_SHOWN = "Telegram may have shown it anyway: do not send it again."
+
+
+def _ambiguous(result: Any) -> bool:
+    raw = getattr(result, "raw_response", None)
+    return isinstance(raw, dict) and bool(raw.get("ambiguous_delivery"))
 
 
 def _available() -> bool:
@@ -55,7 +61,8 @@ SEND_SCHEMA: dict[str, Any] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "A message to send first (Markdown)."},
+            "text": {"type": "string", "description": "A message to send first (Markdown), one message "
+                                                       "long: a longer text belongs in your answer."},
             "buttons": {
                 "type": "array", "maxItems": MAX_BUTTONS,
                 "description": "Buttons under the text, one per row. Each has a label and one of value (a "
@@ -196,20 +203,14 @@ async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | Non
     steps = _plan(deliverable, as_files,
                   lambda ext: should_send_media_as_audio(adapter.platform, ext, is_voice=ext in _VOICE_EXTS))
     text, buttons, single_use = message
-    # One more: the notice of what does not arrive, when files go.
+    # One more: the notice of what does not arrive, when files go. The text is one message (send_single).
     admitted.take(sum(step.messages for step in steps) + (1 if resolved else 0) + (1 if text else 0))
     metadata = admitted.metadata
     out: dict[str, Any] = {}
     if text:
-        markup = adapter.button_markup(turn.chat_id, buttons, single_use=single_use) if buttons else None
-        sent = (await adapter.send_with_buttons(turn.chat_id, text, markup, metadata) if markup
-                else await adapter.send(turn.chat_id, text, metadata=metadata))
-        if not getattr(sent, "success", False):
-            out["message"] = {"sent": False, "reason": str(getattr(sent, "error", None) or "not delivered")}
-            if not resolved:
-                return out
-        else:
-            out["message"] = {"sent": True, "message_id": getattr(sent, "message_id", None)}
+        out["message"] = await _send_text(adapter, turn, admitted, text, buttons, single_use)
+        if not out["message"]["sent"] and not resolved:
+            return out
     if not resolved:
         return out
     receipts: dict[int, Receipt] = {}
@@ -230,6 +231,33 @@ async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | Non
     ordered = [receipts[i] for i in sorted(receipts)]
     return {**out, "sent": [{"file": r.file, "message_id": r.message_id} for r in ordered if r.sent],
             "not_delivered": [{"file": r.file, "reason": r.reason} for r in ordered if not r.sent]}
+
+
+async def _send_text(adapter: Any, turn: Turn, admitted: AdmittedTurn, text: str, buttons: list[dict[str, str]],
+                     single_use: bool) -> dict[str, Any]:
+    """The call's message, with its buttons bound to it once it is shown; its slot is already reserved."""
+    from .buttons import StoreError
+
+    try:
+        markup, set_id = (adapter.button_markup(turn.chat_id, buttons, single_use=single_use, profile=turn.profile)
+                          if buttons else (None, None))
+    except StoreError:
+        admitted.give_back(1)
+        return {"sent": False, "reason": "its choices could not be recorded, so it was not sent"}
+    sent = await adapter.send_single(turn.chat_id, text, markup, admitted.metadata)
+    if not getattr(sent, "success", False):
+        reason = str(getattr(sent, "error", None) or "not delivered")
+        if _ambiguous(sent):
+            return {"sent": False, "reason": f"{reason}. {MAYBE_SHOWN}"}
+        admitted.give_back(1)
+        return {"sent": False, "reason": reason}
+    out: dict[str, Any] = {"sent": True, "message_id": sent.message_id}
+    if set_id is not None:
+        try:
+            adapter._button_store().bind(set_id, sent.message_id, turn.thread_id)
+        except StoreError:
+            out["note"] = "Its choices could not be recorded: taps on them will not reach you."
+    return out
 
 
 async def _send_step(adapter: Any, chat_id: str, step: _Step, caption: str | None, metadata: dict[str, Any],
@@ -264,7 +292,8 @@ async def telegram_send(args: dict[str, Any], **_: Any) -> str:
         runner, adapter = live_adapter()
         await on_gateway_loop(runner, lambda: _admit(adapter, turn))
         resolved = await asyncio.to_thread(_resolve, paths, turn.session_key)
-        result = await on_gateway_loop(runner, lambda: _deliver(adapter, turn, resolved, as_files, caption, message))
+        result = await on_gateway_loop(runner, lambda: as_tool_send(
+            lambda: _deliver(adapter, turn, resolved, as_files, caption, message)))
     except TurnRefused as refused:
         return tool_error(str(refused))
     return json.dumps(result)
@@ -443,18 +472,31 @@ async def _send_poll(adapter: Any, turn: Turn, poll: tuple[str, list[str], Optio
     admitted.take(1)
     question, options, quiz, multiple = poll
     result = await adapter.send_poll(turn.chat_id, question, options, admitted.metadata, quiz_answer=quiz,
-                                     multiple=multiple)
-    if not result.success:
-        admitted.give_back(1)
-        raise TurnRefused(f"The poll was not sent: {result.error}")
-    return {"sent": True, "message_id": result.message_id}
+                                     multiple=multiple, profile=turn.profile)
+    return _sent_or_refused(admitted, result, "poll")
+
+
+def _sent_or_refused(admitted: AdmittedTurn, result: Any, what: str) -> dict[str, Any]:
+    """A one-message send's result: a certain refusal gives its slot back, an uncertain one keeps it."""
+    if result.success:
+        return {"sent": True, "message_id": result.message_id}
+    if _ambiguous(result):
+        raise TurnRefused(f"The {what} may not have been sent ({result.error}). {MAYBE_SHOWN}")
+    admitted.give_back(1)
+    raise TurnRefused(f"The {what} was not sent: {result.error}")
 
 
 async def _react(adapter: Any, turn: Turn, emoji: str, message_id: Optional[str]) -> dict[str, Any]:
     adapter.admitted_turn(turn)
-    target = message_id or turn.inbound_message_id
-    if not str(target).isdigit():
+    target = str(message_id or turn.inbound_message_id)
+    if not target.isdigit():
         raise TurnRefused("This turn has no message of its own to react to: give message_id.")
+    if target != str(turn.inbound_message_id):
+        # Telegram takes only the chat and the message: a message of another topic would get it.
+        mine = adapter._bot_message(turn.chat_id, target)
+        if mine is None or (mine.get("thread") or None) != (turn.thread_id or None):
+            raise TurnRefused("message_id must be the user's current message or one of your messages in this "
+                              "conversation.")
     result = await adapter.react(turn.chat_id, str(target), emoji)
     if not result.success:
         raise TurnRefused(f"The reaction was not set: {result.error}")
@@ -469,16 +511,13 @@ async def _sticker(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, 
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
             raise TurnRefused("find needs a query: an emoji or words.")
-        found = sticker_matches(await adapter.sticker_catalog(), query.strip())
+        found = sticker_matches(await adapter.sticker_catalog(turn.profile), query.strip())
         return {"candidates": [{k: s.get(k) for k in ("sticker_id", "emoji", "description", "set")} for s in found]}
     if args.get("op") != "send" or not isinstance(args.get("sticker_id"), str):
         raise TurnRefused("op must be find (with query) or send (with sticker_id).")
     admitted.take(1)
-    result = await adapter.send_sticker(turn.chat_id, args["sticker_id"], admitted.metadata)
-    if not result.success:
-        admitted.give_back(1)
-        raise TurnRefused(f"The sticker was not sent: {result.error}")
-    return {"sent": True, "message_id": result.message_id}
+    result = await adapter.send_sticker(turn.chat_id, args["sticker_id"], admitted.metadata, turn.profile)
+    return _sent_or_refused(admitted, result, "sticker")
 
 
 def _handler(run: Callable[[Any, Turn, dict[str, Any]], Any]) -> Callable[..., Any]:
@@ -489,7 +528,7 @@ def _handler(run: Callable[[Any, Turn, dict[str, Any]], Any]) -> Callable[..., A
         try:
             turn = Turn.current()
             runner, adapter = live_adapter()
-            result = await on_gateway_loop(runner, lambda: run(adapter, turn, args))
+            result = await on_gateway_loop(runner, lambda: as_tool_send(lambda: run(adapter, turn, args)))
         except TurnRefused as refused:
             return tool_error(str(refused))
         return json.dumps(result)

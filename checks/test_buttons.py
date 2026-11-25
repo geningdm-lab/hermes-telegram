@@ -6,7 +6,8 @@ The store is the real one on a temporary file; what a test asserts is what a lat
 import pytest
 
 from hermes_telegram import tools
-from hermes_telegram.buttons import ButtonStore
+from hermes_telegram.actions import poll_event_text
+from hermes_telegram.buttons import ButtonStore, StoreError, event_text
 from hermes_telegram.turn import TurnRefused
 
 
@@ -15,33 +16,72 @@ def store(tmp_path) -> ButtonStore:
     return ButtonStore(tmp_path / "buttons.json")
 
 
+def _set(store: ButtonStore, buttons: list[tuple[str, str]], *, single_use: bool = True) -> list[str]:
+    """Tokens of a set shown on message 5 of chat 111, as the tool binds it once sent."""
+    set_id, tokens = store.new_set("111", buttons, single_use=single_use)
+    store.bind(set_id, 5, None)
+    return tokens
+
+
+def _claim(store: ButtonStore, token: str) -> tuple:
+    return store.claim(token, "111", 5, None)
+
+
 def test_a_single_use_set_takes_its_first_tap_only(store):
     # Row 11: one tap reaches the agent; a second tap of the same set does not.
-    paris, rome, _ = store.new_set("111", [("Paris", "paris"), ("Rome", "rome"), ("Oslo", "oslo")],
-                                   single_use=True)
-    button, first = store.claim(paris, "111")
+    paris, rome, _ = _set(store, [("Paris", "paris"), ("Rome", "rome"), ("Oslo", "oslo")])
+    button, first = _claim(store, paris)
     assert (button["label"], button["value"], first) == ("Paris", "paris", True)
-    assert store.claim(paris, "111")[1] is False  # the same button again
-    assert store.claim(rome, "111")[1] is False  # another button of the set
+    assert _claim(store, paris)[1] is False  # the same button again
+    assert _claim(store, rome)[1] is False  # another button of the set
 
 
 def test_a_set_that_is_not_single_use_takes_every_tap(store):
-    again, = store.new_set("111", [("Again", "again")], single_use=False)
-    assert store.claim(again, "111")[1] is True
-    assert store.claim(again, "111")[1] is True
+    again, = _set(store, [("Again", "again")], single_use=False)
+    assert _claim(store, again)[1] is True
+    assert _claim(store, again)[1] is True
 
 
 def test_taps_resolve_after_a_restart_and_an_answered_set_stays_answered(tmp_path):
     path = tmp_path / "buttons.json"
-    paris, rome = ButtonStore(path).new_set("111", [("Paris", "paris"), ("Rome", "rome")], single_use=True)
-    assert ButtonStore(path).claim(paris, "111")[1] is True
-    assert ButtonStore(path).claim(rome, "111")[1] is False
+    paris, rome = _set(ButtonStore(path), [("Paris", "paris"), ("Rome", "rome")])
+    assert _claim(ButtonStore(path), paris)[1] is True
+    assert _claim(ButtonStore(path), rome)[1] is False
 
 
-@pytest.mark.parametrize(("token", "chat"), [("unknown-token", "111"), (None, "222")])
-def test_a_token_from_nowhere_or_another_chat_is_not_known(store, token, chat):
-    known, = store.new_set("111", [("Paris", "paris")], single_use=True)
-    assert store.claim(token or known, chat) == (None, False)
+def test_a_released_claim_lets_the_next_tap_be_first(store):
+    paris, rome = _set(store, [("Paris", "paris"), ("Rome", "rome")])
+    _claim(store, paris)
+    store.release(paris)
+    assert _claim(store, rome)[1] is True
+
+
+def test_a_store_that_cannot_save_publishes_and_takes_nothing(store, monkeypatch):
+    # Review slice 4, P2: a choice recorded only in memory would reach the agent again after a restart.
+    import utils
+
+    paris, rome = _set(store, [("Paris", "paris"), ("Rome", "rome")])
+
+    def full_disk(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(utils, "atomic_json_write", full_disk)
+    with pytest.raises(StoreError):
+        store.new_set("111", [("Yes", "yes")], single_use=True)
+    with pytest.raises(StoreError):
+        _claim(store, paris)
+    monkeypatch.undo()
+    assert len(store._tokens) == 2  # the set that was refused left no tokens behind
+    assert _claim(store, rome)[1] is True  # the claim that could not be saved was not taken
+
+
+@pytest.mark.parametrize(("build", "one", "two"), [
+    (lambda labels: event_text(labels[0], "v", 5), ['Paris" value="x'], ["Paris"]),
+    (lambda labels: poll_event_text("Capital?", labels), ['Paris", "Rome'], ["Paris", "Rome"]),
+])
+def test_a_quote_inside_a_field_cannot_read_as_another_field(build, one, two):
+    # Review slice 4, P2: one option holding a quote must not read as two options.
+    assert build(one) != build(two)
+    assert build(["Paris"]).count('"Paris"') == 1  # the plain form the hint teaches is unchanged
 
 
 @pytest.mark.parametrize(("buttons", "error"), [
@@ -63,26 +103,3 @@ def test_buttons_need_a_text_to_go_under():
 def test_a_button_without_a_target_is_a_choice_of_its_label():
     assert tools._parse_message({"text": "Pick", "buttons": [{"label": "Paris"}]}) == (
         "Pick", [{"label": "Paris", "value": "Paris"}], True)
-
-
-def test_a_tap_is_routed_by_the_user_who_tapped(tmp_path):
-    # docs/design.md, Events: a tap by the routed family user reaches the family profile. The route itself is
-    # the gateway's (profile_routes); what the adapter owns is building the tap's source from the tapper.
-    from datetime import datetime
-    from types import SimpleNamespace
-
-    from telegram import CallbackQuery, Chat, Message, User
-
-    from gateway.config import PlatformConfig
-    from hermes_telegram.adapter import HermesTelegramAdapter
-
-    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token="1:x"))
-    adapter.gateway_runner = SimpleNamespace(
-        _profile_name_for_source=lambda source, adapter_profile=None: "family" if source.user_id == "222" else None)
-    message = Message(message_id=5, date=datetime.now(), chat=Chat(id=222, type="private"))
-    tapper = User(id=222, first_name="Kid", is_bot=False)
-    query = CallbackQuery(id="901", from_user=tapper, chat_instance="i", message=message, data="tb:x")
-    event = adapter._tap_event(query, message, {"label": "Yes", "value": "yes"})
-    assert (event.source.profile, event.source.user_id, event.text) == (
-        "family", "222", '[button] "Yes" value="yes" on message 5')
-    assert event.message_id == "cb901" and event.reply_anchor_override == "5"

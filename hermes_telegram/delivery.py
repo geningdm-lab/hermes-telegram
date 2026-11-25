@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 ALBUM_MAX = 10  # sendMediaGroup: 2-10 items
+# raw_response key of a partly delivered send: the ids of every message that did arrive, in order.
+DELIVERED_IDS = "hermes_telegram_delivered_ids"
 
 # While set, notices are collected here instead of sent: a tool call sends them as one message.
 NOTICES: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar("hermes_telegram_notices",

@@ -55,9 +55,15 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "_send_prompt": "PreviewMixin",
     "_send_with_dm_topic_reply_anchor_retry": "ActionsMixin",
     "_register_handlers": "WidgetsMixin",  # slice 5's handler, then slice 4's and slice 3's
-    # Slice 4, hermes_telegram/buttons.py.
+    # Slice 4, hermes_telegram/buttons.py and actions.py.
     "_handle_callback_query": "ButtonsMixin",
     "_handle_sticker": "ActionsMixin",
+    "_set_reaction": "ActionsMixin",  # the agent's reaction stays
+    "_send_control_message": "ActionsMixin",  # prompts are bot messages too
+    "_with_partial_send": "ActionsMixin",  # every delivered id of a partial send
+    # Slice 4 review, hermes_telegram/turn.py: a tool's send keeps the turn's topic.
+    "_should_retry_without_dm_topic_reply_anchor": "HumanTurnsMixin",
+    "_is_thread_not_found_error": "HumanTurnsMixin",
     # Slice 3, hermes_telegram/updates.py: copies with one argument changed (test below).
     "_start_polling_once": "UpdateKindsMixin",
     "_start_webhook_mode": "UpdateKindsMixin",
