@@ -9,6 +9,7 @@
 #   - sibling import plugins.platforms.telegram.telegram_network -> relative .telegram_network
 #   - sibling import plugins.platforms.telegram.telegram_topic_routing -> relative .telegram_topic_routing
 #   - sibling import plugins.platforms.telegram.telegram_topic_transfer -> relative .telegram_topic_transfer
+#   - module logger keeps its upstream name
 #   - repository-root sys.path insertion dropped (the plugin imports Hermes as installed)
 #   - removed TelegramAdapter, _build_adapter, register: hermes_telegram builds and registers the adapter
 # health: allow FILE_LINES -- platform-tables refactor: core's PLATFORM_HINTS/_PLATFORM_DEFAULTS rows for this platform moved onto its register() call (hint text lives in adapter_hint.py); the growth is only those kwargs
@@ -30,7 +31,7 @@ from datetime import datetime, timezone, UTC
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 from hermes_cli import setup_platforms
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
 
 from agent.deadline import run_bounded_async
 from agent.ssl_verify import platform_ssl_context

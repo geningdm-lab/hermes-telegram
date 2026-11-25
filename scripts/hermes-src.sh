@@ -4,7 +4,7 @@
 # Hermes' tests/ are not part of its installed package.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-pin=$(tr -d '[:space:]' < "$root/hermes_telegram/harvested/PIN")
+pin=$(tr -d "[:space:]" < "$root/HERMES_PIN")
 dest=${1:-$root/.cache/hermes-agent}
 if [ ! -d "$dest/.git" ]; then
   git init -q "$dest"

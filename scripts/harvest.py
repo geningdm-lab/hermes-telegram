@@ -1,17 +1,21 @@
 """Harvest the bundled Hermes Telegram adapter into hermes_telegram/harvested/.
 
-Usage: python scripts/harvest.py --src PATH_TO_HERMES_CHECKOUT
+Usage: python scripts/harvest.py --src PATH_TO_HERMES_GIT_REPOSITORY
 
-The checkout must be at PIN. The output is regenerated from scratch, so harvested code is never edited by
-hand: local behaviour lives in hermes_telegram/ outside harvested/, overriding harvested methods.
+The pin is the commit in HERMES_PIN at the repository root. Files are read from that commit's objects in
+the given repository (``git show PIN:path``), never from its working tree, so a local edit there cannot
+end up labelled as upstream code. The output is regenerated from scratch, so harvested code is never
+edited by hand: local behaviour lives in hermes_telegram/ outside harvested/, overriding harvested methods.
 
 What it does:
 - copies the sibling modules of plugins/platforms/telegram/ whole;
 - splits the TelegramAdapter class of adapter.py into one mixin per concern (METHOD_GROUPS), method bodies
   unchanged, and keeps the module-level code of adapter.py as adapter_module.py;
+- writes sdk_names.py: the SDK names check_telegram_requirements() rebinds after a lazy install, which the
+  plugin copies into the mixin modules (they imported the values, not the names);
 - applies only the mechanical rewrites listed in each file's header: sibling imports become relative,
-  the repository-root sys.path insertion is dropped, and references to the TelegramAdapter class name
-  point at the mixin that now owns the method.
+  the repository-root sys.path insertion is dropped, module loggers keep their upstream names, and
+  references to the TelegramAdapter class name point at the mixin that now owns the method.
 
 A method the map does not name stops the run, so an upstream change is assigned on purpose.
 """
@@ -27,10 +31,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-PIN = "c419cf7c864ac0ee511dbd9f7091a8bba0b567ee"
+ROOT = Path(__file__).resolve().parents[1]
+PIN = (ROOT / "HERMES_PIN").read_text(encoding="utf-8").strip()
 UPSTREAM = "NousResearch/hermes-agent"
 SRC_DIR = "plugins/platforms/telegram"
-OUT_DIR = Path(__file__).resolve().parents[1] / "hermes_telegram" / "harvested"
+OUT_DIR = ROOT / "hermes_telegram" / "harvested"
 
 SIBLINGS = [
     "adapter_hint", "dashboard_card", "gateway_env", "inline_picker", "telegram_context",
@@ -183,6 +188,29 @@ DROPPED_TOP_LEVEL = {"TelegramAdapter", "_build_adapter", "register"}
 SYS_PATH_HACK = "sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))"
 # Import statements only: logger names such as "plugins.platforms.telegram.adapter" stay as they are.
 SIBLING_IMPORT = re.compile(r"^(\s*from )plugins\.platforms\.telegram\.(\w+)( import )", re.M)
+# A module logger keeps the name it has upstream: "<plugin package>.adapter" for adapter.py's code, and
+# "<plugin package>.<module>" for a sibling, without the "harvested" level.
+MODULE_LOGGER = "logging.getLogger(__name__)"
+UPSTREAM_LOGGER = ('logging.getLogger(__name__.replace(".harvested.", ".", 1)'
+                   '.replace(".adapter_module", ".adapter"))')
+
+
+def rewrite_logger(text: str) -> tuple[str, list[str]]:
+    count = text.count(MODULE_LOGGER)
+    if not count:
+        return text, []
+    return text.replace(MODULE_LOGGER, UPSTREAM_LOGGER), ["module logger keeps its upstream name"]
+
+
+def git_show(repo: Path, path: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), "show", f"{PIN}:{path}"], capture_output=True, text=True,
+                          check=True).stdout
+
+
+def git_ls(repo: Path, path: str) -> list[str]:
+    out = subprocess.run(["git", "-C", str(repo), "ls-tree", "--name-only", PIN, f"{path}/"],
+                         capture_output=True, text=True, check=True).stdout
+    return [line.rsplit("/", 1)[-1] for line in out.splitlines()]
 
 
 def header(src_name: str, rewrites: list[str], extra: str = "") -> str:
@@ -238,8 +266,13 @@ def module_bound_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def split_adapter(src: Path) -> dict[str, str]:
-    text = (src / "adapter.py").read_text(encoding="utf-8")
+def rebound_sdk_names(tree: ast.Module) -> list[str]:
+    """Names ``check_telegram_requirements`` declares ``global``: it rebinds them after a lazy install."""
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "check_telegram_requirements")
+    return [name for node in ast.walk(fn) if isinstance(node, ast.Global) for name in node.names]
+
+
+def split_adapter(text: str) -> dict[str, str]:
     lines = text.splitlines(keepends=True)
     tree = ast.parse(text)
 
@@ -298,15 +331,21 @@ def split_adapter(src: Path) -> dict[str, str]:
         raise SystemExit("the sys.path insertion changed upstream; review it")
     module_text = module_text.replace(SYS_PATH_HACK, "pass  # repository-root sys.path insertion dropped by harvest")
     module_text, rewrites = rewrite_sibling_imports(module_text)
+    module_text, logger_rewrites = rewrite_logger(module_text)
     module_names = module_bound_names(ast.parse(module_text))
+    rebound = rebound_sdk_names(tree)
 
     out = {
         "adapter_module.py": header(
-            "adapter.py", rewrites + [
+            "adapter.py", rewrites + logger_rewrites + [
                 "repository-root sys.path insertion dropped (the plugin imports Hermes as installed)",
                 f"removed {', '.join(sorted(DROPPED_TOP_LEVEL))}: hermes_telegram builds and registers the adapter",
             ], "Module-level code of adapter.py: imports, helpers, constants, registration hooks.",
         ) + module_text,
+        "sdk_names.py": header(
+            "adapter.py", [], "Generated from the global statements of check_telegram_requirements().",
+        ) + '"""SDK names check_telegram_requirements() rebinds in adapter_module after a lazy install."""\n\n'
+          + "REBOUND = (\n" + "".join(f'    "{name}",\n' for name in rebound) + ")\n",
     }
 
     for module, (class_name, purpose) in MIXINS.items():
@@ -333,23 +372,23 @@ def split_adapter(src: Path) -> dict[str, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--src", required=True, type=Path, help="Hermes checkout at PIN")
+    parser.add_argument("--src", required=True, type=Path, help="a Hermes git repository that has the pin")
     args = parser.parse_args()
-    src_root: Path = args.src.resolve()
-    head = subprocess.run(["git", "-C", str(src_root), "rev-parse", "HEAD"], capture_output=True, text=True,
-                          check=True).stdout.strip()
-    if head != PIN:
-        raise SystemExit(f"{src_root} is at {head}, expected {PIN}; update PIN deliberately")
-    src = src_root / SRC_DIR
+    repo: Path = args.src.resolve()
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{PIN}^{{commit}}"],
+                            capture_output=True, text=True).stdout.strip()
+    if commit != PIN:
+        raise SystemExit(f"{repo} has no commit {PIN}; run scripts/hermes-src.sh")
 
     files: dict[str, str] = {}
     for name in SIBLINGS:
-        text, rewrites = rewrite_sibling_imports((src / f"{name}.py").read_text(encoding="utf-8"))
-        files[f"{name}.py"] = header(f"{name}.py", rewrites) + text
-    present = {p.stem for p in src.glob("*.py")} - {"__init__", "adapter"}
+        text, rewrites = rewrite_sibling_imports(git_show(repo, f"{SRC_DIR}/{name}.py"))
+        text, logger_rewrites = rewrite_logger(text)
+        files[f"{name}.py"] = header(f"{name}.py", rewrites + logger_rewrites) + text
+    present = {n[:-3] for n in git_ls(repo, SRC_DIR) if n.endswith(".py")} - {"__init__", "adapter"}
     if present != set(SIBLINGS):
         raise SystemExit(f"sibling modules changed upstream: {sorted(present ^ set(SIBLINGS))}")
-    files.update(split_adapter(src))
+    files.update(split_adapter(git_show(repo, f"{SRC_DIR}/adapter.py")))
     files["__init__.py"] = header(
         "", [], "Package of harvested code; see scripts/harvest.py for what each module holds.")
 
@@ -358,7 +397,7 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True)
     for name, text in sorted(files.items()):
         (OUT_DIR / name).write_text(text, encoding="utf-8")
-    shutil.copyfile(src_root / "LICENSE", OUT_DIR / "LICENSE.hermes")
+    (OUT_DIR / "LICENSE.hermes").write_text(git_show(repo, "LICENSE"), encoding="utf-8")
     (OUT_DIR / "PIN").write_text(PIN + "\n", encoding="utf-8")
     total = sum(t.count("\n") for t in files.values())
     print(f"harvested {len(files)} files, {total} lines, from {UPSTREAM}@{PIN[:7]} into {OUT_DIR}")
