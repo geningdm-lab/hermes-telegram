@@ -10,11 +10,15 @@ plugin changes goes into its own mixins, listed before the harvested ones so the
 - ``HumanTurnsMixin`` (slice 2): the human Telegram events being processed, which the agent's tools act for.
 - ``UpdateKindsMixin`` (slice 3): asks Telegram for the Bot API update kinds PTB 22.8 does not list.
 - ``PreviewMixin`` (slice 3): the preview of a turn in a private chat: status, partial answer, Stop.
+- ``ButtonsMixin`` (slice 4): the agent's action buttons, whose taps come back to it as messages.
+- ``ActionsMixin`` (slice 4): polls, reactions and stickers, and the answers and reactions that come back.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
 
+from .actions import ActionsMixin
 from .answers import RichAnswersMixin
+from .buttons import ButtonsMixin
 from .files import FilesMixin
 from .harvested.adapter_access import AccessMixin
 from .harvested.adapter_core import CoreMixin
@@ -35,6 +39,8 @@ from .updates import UpdateKindsMixin
 
 class HermesTelegramAdapter(
     # This plugin's behaviour.
+    ButtonsMixin,
+    ActionsMixin,
     PreviewMixin,
     RichAnswersMixin,
     FilesMixin,

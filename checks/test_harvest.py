@@ -50,11 +50,14 @@ INTENDED_OVERRIDES: dict[str, str] = {
     # Slice 3, hermes_telegram/preview.py (the hooks chain on to HumanTurnsMixin's).
     "on_processing_start": "PreviewMixin",
     "on_processing_complete": "PreviewMixin",
-    "send": "PreviewMixin",
+    "send": "ActionsMixin",  # slice 4 remembers the bot's messages, then slice 3's preview
     "send_draft": "PreviewMixin",
     "_send_prompt": "PreviewMixin",
-    "_send_with_dm_topic_reply_anchor_retry": "PreviewMixin",
-    "_register_handlers": "PreviewMixin",
+    "_send_with_dm_topic_reply_anchor_retry": "ActionsMixin",
+    "_register_handlers": "ActionsMixin",
+    # Slice 4, hermes_telegram/buttons.py.
+    "_handle_callback_query": "ButtonsMixin",
+    "_handle_sticker": "ActionsMixin",
     # Slice 3, hermes_telegram/updates.py: copies with one argument changed (test below).
     "_start_polling_once": "UpdateKindsMixin",
     "_start_webhook_mode": "UpdateKindsMixin",
