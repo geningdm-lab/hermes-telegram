@@ -34,6 +34,8 @@ Acceptance is the 17 rows of the Prism PRD, unchanged, together with the owner's
 | 16 | Short plain answer stays one ordinary text message | 1 |
 | 17 | Cron reports and approvals keep working, also during a preview and after a Stop | 3 |
 
+Amendment, owner decision on PR #1 (2026-11-25): in row 1 the mathematical expression is rendered as a formula by Telegram, not shown in a code block. Its LaTeX source must equal the agent's. This departs from the Prism row on purpose; compare row 1 with that in mind.
+
 ## What exists today
 
 Verified in the source of the pinned Hermes, `NousResearch/hermes-agent@c419cf7`, which `homelab/nix/flake.lock` deploys:
@@ -60,6 +62,7 @@ From core.telegram.org, read 2026-11-25. "Prod" means production Telegram in a p
 | Inline buttons: callback (64 bytes), url, copy_text, colour `style` (9.4) | Prod | System prompts only | Agent tool; taps come back as events |
 | Media: photo 10 MB, other files 50 MB by upload; albums of 2-10; captions 1024 | Prod | Via `MEDIA:` | Kept, plus explicit send, albums and as-file |
 | Polls and quizzes (12 options) | Prod | No | Agent tool; answers come back as events |
+| Stickers: send by `file_id`; `getStickerSet` lists a set's stickers with their emoji | Prod | Inbound only: described once with vision and cached (`gateway/sticker_cache.py`) | Agent tool over a sticker catalog |
 | Reactions, message effects, pin, edit, delete, quote replies | Prod | Reactions as status only | Agent tools |
 | Topics in private chats (9.3-10.5) | Prod | Yes | Kept |
 | Ephemeral messages, guest mode, bot-to-bot, business, checklists | Groups, business or opt-in | No | Out of scope |
@@ -90,6 +93,12 @@ Which functions move and how is decided in slice 0 by reading each piece. The ta
 
 The plugin stays on python-telegram-bot 22.8, which the Hermes environment already ships, so the harvested code keeps working and other plugins' `register_telegram_handler` handlers, which are PTB handlers (`hermes_cli/plugins.py:848`), keep receiving updates. Methods from Bot API 10.1 on go through `Bot.do_api_request`, as the bundled adapter already does for `sendRichMessage` (`adapter.py:1509`), with our own typed payload builders. Update kinds PTB does not model (`widget_query`, `stopped_message_generation`) are read from the raw update; we assume PTB keeps unknown fields in `api_kwargs`. Slice 0 verifies that assumption against PTB 22.8 and a recorded update, before anything depends on it. The subscription asks for those update kinds explicitly in `allowed_updates`.
 
+The PTB version is not ours to choose, and there is nothing newer to choose:
+
+- 22.8 is the latest release on PyPI (2026-06-12). Upstream support for Bot API 10.1 is still the open issue python-telegram-bot#5261, and the 10.3 pull request #5359 was closed unmerged.
+- The plugin runs inside the Hermes gateway process and imports the same `telegram` package. Hermes pins it exactly, `python-telegram-bot[webhooks]==22.8` (`pyproject.toml:271`), and the host's environment is built from Hermes' lock file by uv2nix. A different version would have to override Hermes' own dependency in `homelab`, for the bundled code and every other plugin too.
+- When a PTB release models Bot API 10.x and Hermes moves to it, our raw payload builders can give way to PTB methods one by one. Until then, raw calls are the only path either way.
+
 ### What stays coupled
 
 - Harvested code imports about 40 names from Hermes core, some private, for example `gateway.run.cfg_get` and `tools.send_message_tool._send_telegram`. A Hermes upgrade can break them. The integration suite runs against the pinned commit, and an upgrade is a deliberate step: bump the pin, run the suite.
@@ -106,12 +115,19 @@ The agent keeps writing ordinary Markdown. The adapter chooses the form:
 - An answer with structure (headings, tables, lists, quotes, code, links) is sent with `sendRichMessage` in `markdown` mode. Telegram's rich Markdown is GFM-compatible, so the agent's text passes nearly unchanged instead of the lossy MarkdownV2 conversion.
 - A short answer with no structure is one ordinary `sendMessage` (row 16).
 - An answer over 32768 characters or 500 blocks is cut at top-level block boundaries into consecutive rich messages, in order (row 1).
+- Maths is written in LaTeX, `$...$` inline and `$$...$$` as a block, and Telegram renders it. Because `$` starts inline maths, a literal dollar must not become a formula: "between $5 and $10" is a case slice 1 tests, and the hint tells the agent to escape a literal `$`.
 - `MEDIA:` lines and `[[audio_as_voice]]` keep working, because other tools and skills emit them.
 - The prompt hint is rewritten: tables, task lists and the tools below are allowed and described.
 
 ### Tools
 
-Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. Hermes forbids a tool that lets the agent send messages anywhere on its own (`website/docs/developer-guide/adding-platform-adapters.md:330`); these tools only answer inside the current conversation. Outside a Telegram turn (CLI, cron) they are unavailable. A profile gets them only if its toolsets include `telegram`; the `family` profile lists its toolsets explicitly, so it gets none until the owner adds it.
+Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. A profile gets them only if its toolsets include `telegram`; the `family` profile lists its toolsets explicitly, so it gets none until the owner adds it.
+
+Hermes forbids plugins to give the model a tool that lets it send messages on its own (`website/docs/developer-guide/adding-platform-adapters.md:330`). Its send engine takes any platform and chat as the target, so a model holding it could be talked by injected content into writing to other people, or could write when nobody asked. These tools keep both out of the model's hands:
+
+- The model never names the recipient. The target is the chat the user wrote from, the same one its final answer goes to.
+- The tools exist only during a turn that a user's message, tap or widget request started in a Telegram chat. They are unavailable in cron runs, the CLI and other surfaces.
+- A turn may send at most a bounded number of extra messages (a configured cap, 10 by default). Past it, the tool returns an error to the agent and sends nothing.
 
 | Tool | Does | Returns |
 |---|---|---|
@@ -120,9 +136,12 @@ Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls
 | `telegram_widget(html, caption, height?)` | Sends a widget after checking its size, its compressed size and the sandbox rules (no network APIs, no external resources) | message id, or the reason it was refused |
 | `telegram_poll(question, options, quiz_answer?, multiple?)` | Sends a poll or a quiz | message id |
 | `telegram_react(emoji, message_id?)` | Reacts to a message, by default the user's current one | ok |
+| `telegram_sticker(op, query? \| sticker_id?)` | `find` searches the sticker catalog by emoji or description; `send` sends one sticker from it | candidates, or a message id |
 | `telegram_message(op, message_id, ...)` | Edits, deletes, pins or unpins one of the bot's messages in this chat, or updates a widget's bot-written state | ok |
 
 A button is `{label, value?, url?, copy?, style?}`. A button with `value` is an action: its tap comes back to the agent. `url` opens a link, `copy` copies text.
+
+The sticker catalog has two sources. One is the stickers users sent to the bot: today Hermes stores only their vision description, emoji and set name (`gateway/sticker_cache.py:60`), so the plugin also records each one's `file_id`. The other is sticker sets the profile names in its configuration, read with `getStickerSet`; their stickers carry an emoji and the set title, but no description. A sticker id the agent gets from `find` is valid only for this bot.
 
 ### Events
 
@@ -169,15 +188,20 @@ Each slice is one PR to `main`, reviewed by the owner.
 1. Rich answers: rows 1, 2, 16.
 2. Files: rows 3, 4, 5, 15, and the cause of today's failed sends.
 3. Lifecycle: rows 6 to 10, 17.
-4. Buttons, polls, reactions and their events: row 11.
+4. Buttons, polls, reactions, stickers and their events: row 11.
 5. Widgets: rows 12 to 14.
 6. The rest of the agent surface: effects, pins, edits, link previews, quote replies.
 
-## Open questions for the owner
+## Decisions and open questions
 
-1. Maths. You decided "Math equations should just be wrapped as code block", and row 1 expects a code block. Rich messages now render LaTeX natively (`$$...$$`, `math` fences). Keep the code block for comparability, or render formulas?
-2. The tool set above: six tools in one toolset `telegram`. Is that the surface you want, or do you want fewer and broader tools?
-3. Our tools send only to the current chat. My reading is that this keeps Hermes' rule against a general send tool. Do you agree?
+Decided by the owner on PR #1, 2026-11-25:
+
+1. Maths renders as LaTeX ("1 - LaTeX"). Row 1 is amended accordingly.
+2. The tool set stands, plus stickers ("Норм, я бы еще стикеры добавил бы").
+
+Open:
+
+3. Do the three guards under Tools (no recipient chosen by the model, only in user-started Telegram turns, a cap per turn) satisfy you as the reading of Hermes' rule against a general send tool?
 
 ## Out of scope
 
