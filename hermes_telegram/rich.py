@@ -39,8 +39,6 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)((?:(?!\n[ \t]*\n).)+?)(?<!`)\1(?!
 _HTML_CODE_RE = re.compile(r"<(code|pre)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
 _MATH_BLOCK_LINE_RE = re.compile(r"^[ \t]*\$\$")
 _DISPLAY_MATH_RE = re.compile(r"\$\$.+?\$\$", re.DOTALL)
-_BRACKET_MATH_RE = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
-_PAREN_MATH_RE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
 
 # HTML the agent may write inside a rich answer (rich-messages, "Rich HTML style"). Any other "<" is text
 # and is escaped, so "List<String>" or "<<marker>>" are shown as written instead of being read as a tag.
@@ -65,6 +63,8 @@ def needs_rich(text: str) -> bool:
     """
     if not text or not text.strip():
         return False
+    if any(segment.is_code for segment in _segments(text)):  # fenced or indented code
+        return True
     for line in text.splitlines():
         if (_HEADING_RE.match(line) or _LIST_ITEM_RE.match(line) or _QUOTE_RE.match(line)
                 or _FENCE_RE.match(line) or _TABLE_SEPARATOR_RE.match(line) or _RULE_RE.match(line)
@@ -213,16 +213,56 @@ def _has_inline_math(text: str) -> bool:
     return False
 
 
-def _protect_inline_maths(text: str, masks: _Masks) -> str:
-    """Inline maths set aside whole; each stray ``$`` escaped."""
-    spans, stray = _inline_math_spans(text)
-    events = sorted([(s, e, "span") for s, e in spans] + [(i, i, "stray") for i in stray])
-    out, pos = [], 0
-    for start, end, kind in events:
-        out.append(text[pos:start])
-        out.append(masks.put(text[start:end + 1]) if kind == "span" else "\\$")
-        pos = end + 1
-    out.append(text[pos:])
+def _inline_span_end(text: str, i: int) -> int:
+    """The closing ``$`` of an inline span opening at ``i`` under ``_inline_math_spans``' rule, or -1."""
+    if i + 1 >= len(text) or text[i + 1].isspace():
+        return -1
+    limit = text.find("\n\n", i)
+    limit = len(text) if limit == -1 else limit
+    for j in range(i + 1, limit):
+        if text[j] == "$" and text[j - 1] != "\\":
+            return j if _is_closing_dollar(text, j) else -1
+    return -1
+
+
+def _protect_maths(text: str, masks: _Masks) -> str:
+    """Every formula set aside whole, whichever delimiter opens it first, and each stray ``$`` escaped.
+
+    One scan from the left, so no rule for prose reaches inside a formula: ``$$...$$`` and ``$...$`` as
+    written, ``\\[...\\]`` and ``\\(...\\)`` as ``$$...$$`` and ``$...$`` with their body unchanged. An escaped
+    character (``\\$``, ``\\\\``) is skipped."""
+    out: list[str] = []
+    i = plain = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            if text[i + 1] in "[(":
+                close = "\\]" if text[i + 1] == "[" else "\\)"
+                j = text.find(close, i + 2)
+                body = text[i + 2:j].strip() if j != -1 else ""
+                if body:
+                    fence = "$$" if text[i + 1] == "[" else "$"
+                    out.append(text[plain:i])
+                    out.append(masks.put(fence + body + fence))
+                    i = plain = j + 2
+                    continue
+            i += 2
+            continue
+        if char != "$":
+            i += 1
+            continue
+        if text.startswith("$$", i):
+            j = text.find("$$", i + 2)
+            if j > i + 2:
+                out.append(text[plain:i])
+                out.append(masks.put(text[i:j + 2]))
+                i = plain = j + 2
+                continue
+        end = _inline_span_end(text, i)
+        out.append(text[plain:i])
+        out.append(masks.put(text[i:end + 1]) if end != -1 else "\\$")
+        i = plain = (end + 1) if end != -1 else i + 1
+    out.append(text[plain:])
     return "".join(out)
 
 
@@ -257,12 +297,9 @@ def _hard_breaks(text: str) -> str:
 def _prepare_prose(text: str, masks: _Masks) -> str:
     text = masks.mask(text, _INLINE_CODE_RE)
     text = masks.mask(text, _HTML_CODE_RE)
-    # Formulas the agent wrote with dollars first, so nothing inside them is rewritten.
-    text = masks.mask(text, _DISPLAY_MATH_RE)
-    text = _protect_inline_maths(text, masks)
-    # LaTeX delimiters models often write, turned into the ones Telegram reads, and set aside whole.
-    text = _BRACKET_MATH_RE.sub(lambda m: masks.put("$$" + m.group(1).strip() + "$$"), text)
-    text = _PAREN_MATH_RE.sub(lambda m: masks.put("$" + m.group(1).strip() + "$"), text)
+    # Formulas set aside whole before anything else, whatever their delimiters: LaTeX delimiters models
+    # often write become the ones Telegram reads.
+    text = _protect_maths(text, masks)
     text = masks.mask(text, _ALLOWED_TAG_RE)
     text = masks.mask(text, _AUTOLINK_RE)
     text = re.sub(r"(?<!\\)<", lambda _m: "\\<", text)
@@ -478,7 +515,6 @@ def split_markdown(text: str, char_budget: int = CHAR_BUDGET, block_budget: int 
     if len(text) <= char_budget and estimate_blocks(text) <= block_budget:
         return [text]
     definitions = _footnote_definitions(text) if _FOOTNOTE_REF_RE.search(text) else {}
-    char_budget -= min(sum(len(d) for d in definitions.values()), char_budget // 4)
     lines = _classify(text)
     parts: list[str] = []
     start, carry = 0, ""
@@ -511,11 +547,20 @@ def split_markdown(text: str, char_budget: int = CHAR_BUDGET, block_budget: int 
             carry = _with_newline(line.fence_open) if in_code else ""
             continue
         size, blocks, end = len(carry), estimate_blocks(carry), start
+        reserved, reserved_blocks, referenced = 0, 0, set()
         while end < len(lines):
             line = lines[end]
-            if end > start and (size + len(line.text) > char_budget or blocks + line.blocks > block_budget):
+            # Room for the definitions this line's references need: the part gets copies of them.
+            new = [r for r in dict.fromkeys(_FOOTNOTE_REF_RE.findall(line.text)) if r in definitions
+                   and r not in referenced] if definitions else []
+            extra = sum(len(definitions[r]) for r in new) + (2 if new and not referenced else 0)
+            extra_blocks = sum(estimate_blocks(definitions[r]) for r in new)
+            if end > start and (size + len(line.text) + reserved + extra > char_budget
+                                or blocks + line.blocks + reserved_blocks + extra_blocks > block_budget):
                 break
             size, blocks, end = size + len(line.text), blocks + line.blocks, end + 1
+            reserved, reserved_blocks = reserved + extra, reserved_blocks + extra_blocks
+            referenced.update(new)
         if end == len(lines):
             parts.append(carry + "".join(line.text for line in lines[start:end]))
             break

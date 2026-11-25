@@ -11,6 +11,7 @@ harvested path; slice 3 owns it (docs/review-log.md, slice 1).
 """
 
 import asyncio
+import contextvars
 import re
 from collections import deque
 from datetime import timedelta
@@ -30,6 +31,17 @@ Item = tuple[str, str, int]
 _MAX_RESPLITS = 2
 # Below this a refused part is not cut further: it goes as MarkdownV2 chunks.
 _MIN_PART_CHARS = 1000
+# Set while _send_items sends a MarkdownV2 chunk of a rich answer (see _send_chunk_markdown_or_plain).
+_FALLBACK_CHUNK: contextvars.ContextVar[bool] = contextvars.ContextVar("hermes_telegram_fallback_chunk",
+                                                                      default=False)
+
+
+class _FloodWait(Exception):
+    """A flood refusal with its wait in seconds, as the harvested chunk sender reads one (``retry_after``)."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"Flood control exceeded. Retry in {seconds:g} seconds")
+        self.retry_after = seconds
 
 
 class RichAnswersMixin:
@@ -106,6 +118,27 @@ class RichAnswersMixin:
         result.raw_response = raw
         return result
 
+    async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: dict[str, Any]) -> Any:
+        """The harvested single attempt, with two changes for the retry loop around it.
+
+        A flood wait PTB gives as a ``timedelta`` is passed on in seconds: the loop computes
+        ``float(retry_after)``. And for a chunk of a rich answer (``_FALLBACK_CHUNK``), an error after which
+        Telegram may have shown the chunk is passed on as a ``TimedOut``, which the loop does not retry: the
+        answer's sender then stops rather than show the chunk twice. Ordinary messages keep the harvested
+        retry policy (docs/review-log.md, slice 1)."""
+        try:
+            return await super()._send_chunk_markdown_or_plain(chunk, send_kwargs)
+        except Exception as exc:
+            retry_after = getattr(exc, "retry_after", None)
+            if isinstance(retry_after, timedelta):
+                raise _FloodWait(retry_after.total_seconds()) from exc
+            if not _FALLBACK_CHUNK.get() or self._is_bad_request_error(exc) or self._certainly_unsent(exc):
+                raise
+            from telegram.error import NetworkError, TimedOut
+            if isinstance(exc, NetworkError) and not isinstance(exc, TimedOut):
+                raise TimedOut(f"Telegram's reply was lost after the chunk was sent: {exc}") from exc
+            raise
+
     def _send_retry_is_final(self, result: SendResult) -> bool:
         """A part that may have been shown is never sent again: not by the base retry, which would resend the
         whole answer, and not by its plain-text fallback."""
@@ -167,6 +200,7 @@ class RichAnswersMixin:
             index = len(delivered)
             await self._pace(chat_id)
             if kind == "plain":
+                token = _FALLBACK_CHUNK.set(True)
                 try:
                     outcome = await self._send_chunk_with_retries(
                         chat_id, text, index, reply_to, metadata, thread_id, thread_fallback, error_types)
@@ -174,6 +208,8 @@ class RichAnswersMixin:
                     classified = self._classify_send_exception(exc, error_types)
                     return self._partial(classified, items, delivered, tail_certain=self._certainly_unsent(exc),
                                          thread_fallback=thread_fallback)
+                finally:
+                    _FALLBACK_CHUNK.reset(token)
                 if isinstance(outcome, SendResult):  # a definite non-delivery
                     return self._partial(outcome, items, delivered, thread_fallback=thread_fallback)
                 msg, thread_fallback = outcome

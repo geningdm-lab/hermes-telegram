@@ -6,6 +6,7 @@ checks/e2e/standin.py, which checks the documented upload limits. What a scenari
 received; whether a client plays it is live acceptance.
 """
 
+import hashlib
 import io
 import sys
 from pathlib import Path
@@ -82,6 +83,10 @@ class _Turn:
         return [t for t in texts if "was not delivered" in t]
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _upload(call: Any, field: str) -> dict[str, Any]:
     return call.params[field]
 
@@ -93,7 +98,7 @@ def test_each_kind_of_file_arrives_as_that_kind(rig, media):
     turn.wait("four media sends", lambda: len(turn.calls(*MEDIA_METHODS)) >= 4)
     doc = turn.calls("sendDocument")
     assert [_upload(c, "document")["filename"] for c in doc] == ["report.pdf"]
-    assert _upload(doc[0], "document")["size"] == media["doc"].stat().st_size  # bytes unchanged
+    assert _upload(doc[0], "document")["sha256"] == _sha256(media["doc"])  # bytes unchanged
     assert len(turn.calls("sendPhoto")) == 1
     assert len(turn.calls("sendVideo")) == 1
     assert len(turn.calls("sendAudio")) == 1
@@ -107,7 +112,7 @@ def test_a_voice_note_arrives_as_a_voice_message(rig, media):
     assert len(turn.calls("sendVoice")) == 1 and not turn.calls("sendDocument", "sendAudio")
 
 
-@pytest.mark.parametrize(("count", "albums"), [(3, [3]), (12, [10, 2])])
+@pytest.mark.parametrize(("count", "albums"), [(3, [3]), (11, [9, 2]), (12, [10, 2])])
 def test_photos_arrive_as_albums_of_up_to_ten_in_order(rig, media, count: int, albums: list[int]):
     # Row 4.
     lines = "\n".join(f"MEDIA:{media[f'album{i}']}" for i in range(count))
@@ -134,7 +139,7 @@ def test_media_asked_for_as_files_arrive_as_documents_with_name_and_bytes_unchan
     turn.wait("four documents", lambda: len(turn.calls("sendDocument")) >= 4)
     docs = turn.calls("sendDocument")
     assert [_upload(c, "document")["filename"] for c in docs] == [media[k].name for k in keys]
-    assert [_upload(c, "document")["size"] for c in docs] == [media[k].stat().st_size for k in keys]
+    assert [_upload(c, "document")["sha256"] for c in docs] == [_sha256(media[k]) for k in keys]
     assert all(str(c.params.get("disable_content_type_detection")).lower() == "true" for c in docs)
     assert not turn.calls("sendPhoto", "sendVideo", "sendAudio", "sendVoice", "sendMediaGroup")
 
