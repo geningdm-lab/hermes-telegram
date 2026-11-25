@@ -113,6 +113,16 @@ class ButtonStore:
             group["message"], group["thread"] = str(message_id), str(thread_id) if thread_id else None
             self._save()
 
+    def retire(self, chat_id: str, message_id: Any) -> None:
+        """The sets bound to this message no longer take taps: an edit replaced its keyboard."""
+        self._load()
+        changed = False
+        for group in self._sets.values():
+            if group.get("chat") == str(chat_id) and group.get("message") == str(message_id):
+                group["message"], changed = None, True
+        if changed:
+            self._save()
+
     def claim(self, token: str, chat_id: str, message_id: Any, thread_id: Any,
               profile: str = "") -> tuple[Optional[dict[str, Any]], bool]:
         """``(button, first)`` for a tap: ``(None, False)`` for a token not of this chat, message, topic and
@@ -183,24 +193,45 @@ class ButtonsMixin:
             rows.append([button])
         return {"inline_keyboard": rows}, set_id
 
-    async def send_single(self, chat_id: str, text: str, markup: Optional[dict[str, Any]],
-                          metadata: Optional[dict[str, Any]]) -> Any:
-        """A tool's message as one message, never several: a rich message when the answer path would send
-        it rich (the same checks, Telegram Desktop's guards included), else MarkdownV2; with its buttons, the
-        profile's notification policy, and no fallback out of the turn's topic."""
-        from gateway.platforms.base import SendResult, utf16_len
+    def _single_body(self, text: str, keyboard: bool) -> tuple[bool, str]:
+        """``(rich, body)`` of a tool's text as one message: the prepared Markdown of a rich message when the
+        answer path would send it rich (the same checks, Telegram Desktop's guards included), else MarkdownV2.
+        ``ValueError`` when it does not fit one message."""
+        from gateway.platforms.base import utf16_len
 
         from . import rich
+
+        prepared = rich.prepare_markdown(text)
+        if (self._rich_eligible_any_length(text, part=keyboard) and len(prepared) <= rich.MAX_CHARS
+                and rich.estimate_blocks(prepared) <= rich.MAX_BLOCKS):
+            return True, prepared
+        formatted = self.format_message(text)
+        if utf16_len(formatted) > self.MAX_MESSAGE_LENGTH:
+            raise ValueError("the text is too long for one message: put it in your answer")
+        return False, formatted
+
+    async def send_single(self, chat_id: str, text: str, markup: Optional[dict[str, Any]],
+                          metadata: Optional[dict[str, Any]], *, reply_to: Optional[str] = None,
+                          quote: Optional[str] = None, link_preview: Optional[dict[str, Any]] = None,
+                          effect: Optional[str] = None) -> Any:
+        """A tool's message as one message, never several (``_single_body``); with its buttons, the profile's
+        notification policy, and no fallback out of the turn's topic. ``reply_to`` replaces the turn's reply
+        anchor, with ``quote`` an exact part of that message. ``link_preview`` (LinkPreviewOptions, else the
+        profile's ``disable_link_previews``) applies to a MarkdownV2 message: a rich one does not take it.
+        ``effect`` is a message effect id, for private chats."""
+        from gateway.platforms.base import SendResult
+
         from .harvested.adapter_module import _redact_telegram_error_text, normalize_telegram_chat_id
+        from .messages import preview_options
 
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        prepared = rich.prepare_markdown(text)
-        as_rich = (self._rich_eligible_any_length(text, part=bool(markup)) and len(prepared) <= rich.MAX_CHARS
-                   and rich.estimate_blocks(prepared) <= rich.MAX_BLOCKS)
-        formatted = None if as_rich else self.format_message(text)
-        if formatted is not None and utf16_len(formatted) > self.MAX_MESSAGE_LENGTH:
-            return SendResult(success=False, error="the text is too long for one message: put it in your answer")
+        try:
+            as_rich, body = self._single_body(text, bool(markup))
+        except ValueError as too_long:
+            return SendResult(success=False, error=str(too_long))
+        if effect and int(normalize_telegram_chat_id(chat_id)) <= 0:
+            return SendResult(success=False, error="message effects work only in private chats")
         thread_id = self._metadata_thread_id(metadata)
         routing = self._compute_single_send_routing(chat_id, None, metadata, thread_id)
         if routing is None:
@@ -211,22 +242,31 @@ class ButtonsMixin:
                                 **self._notification_kwargs(metadata)}
         if markup:
             base["reply_markup"] = markup
+        if reply_to is not None:
+            reply_to_id = int(reply_to)
         if reply_to_id is not None:
-            base["reply_parameters"] = {"message_id": reply_to_id}
+            base["reply_parameters"] = {"message_id": reply_to_id, **({"quote": quote} if quote else {})}
+        if effect:
+            base["message_effect_id"] = effect
+        preview = preview_options(link_preview, getattr(self, "_disable_link_previews", False))
         await self._before_message(chat_id, thread_id, text)  # the preview's fence
         try:
             if as_rich:
                 sent = await self._bot.do_api_request("sendRichMessage",
-                                                       api_kwargs={**base, "rich_message": {"markdown": prepared}})
+                                                       api_kwargs={**base, "rich_message": {"markdown": body}})
                 message_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
             else:
-                msg = await self._bot.send_message(chat_id=base.pop("chat_id"), text=formatted, parse_mode="MarkdownV2",
+                if preview:
+                    base["link_preview_options"] = preview
+                msg = await self._bot.send_message(chat_id=base.pop("chat_id"), text=body, parse_mode="MarkdownV2",
                                                    api_kwargs=base)
                 message_id = msg.message_id
         except Exception as exc:
             return self._send_failed(exc, _redact_telegram_error_text(exc))
         result = SendResult(success=True, message_id=str(message_id))
-        self._remember_bot_messages(chat_id, [result], thread_id)
+        if as_rich and link_preview:
+            result.raw_response = {"preview_ignored": True}
+        self._remember_bot_messages(chat_id, [result], thread_id, markup=markup)
         self._reshow_soon(chat_id, thread_id)
         return result
 

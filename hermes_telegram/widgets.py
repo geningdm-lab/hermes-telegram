@@ -184,7 +184,7 @@ class WidgetsMixin:
         message_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
         self._reshow_soon(chat_id, thread_id)
         result = SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
-        self._remember_bot_messages(chat_id, [result], thread_id)
+        self._remember_bot_messages(chat_id, [result], thread_id, kind="widget")
         try:
             self._store("widgets", _WIDGET_MEMORY).put(f"{chat_id}:{message_id}", {
                 "thread": str(thread_id) if thread_id else None, "profile": profile or ""})

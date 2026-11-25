@@ -13,6 +13,7 @@ plugin changes goes into its own mixins, listed before the harvested ones so the
 - ``ButtonsMixin`` (slice 4): the agent's action buttons, whose taps come back to it as messages.
 - ``ActionsMixin`` (slice 4): polls, reactions and stickers, and the answers and reactions that come back.
 - ``WidgetsMixin`` (slice 5): widgets as visual answers, and their requests back to the agent.
+- ``MessagesMixin`` (slice 6): the agent's own messages edited, deleted, pinned and unpinned.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
@@ -33,6 +34,7 @@ from .harvested.adapter_topics import TopicsMixin
 from .harvested.adapter_transport import TransportMixin
 from .harvested.telegram_held_inbound import TelegramHeldInboundMixin
 from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
+from .messages import MessagesMixin
 from .turn import HumanTurnsMixin
 from .preview import PreviewMixin
 from .updates import UpdateKindsMixin
@@ -41,6 +43,7 @@ from .widgets import WidgetsMixin
 
 class HermesTelegramAdapter(
     # This plugin's behaviour.
+    MessagesMixin,
     ButtonsMixin,
     WidgetsMixin,
     ActionsMixin,

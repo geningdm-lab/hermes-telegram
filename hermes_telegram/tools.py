@@ -53,7 +53,10 @@ SEND_SCHEMA: dict[str, Any] = {
         "only the first tap of the set reaches you, later taps show \"Already answered\". A button with url "
         "opens a link; with copy, copies text. Files follow, in the order given. Each file arrives as its kind: "
         "photo, video, audio, voice note (.ogg/.opus) or document; consecutive photos arrive as one album, more "
-        "than 10 as consecutive albums. With as_files=true every file arrives as a downloadable document with "
+        "than 10 as consecutive albums. The text can reply to the user's current message or one of yours "
+        "(reply_to), quoting an exact part of it (quote), set link_preview options, and carry a message effect "
+        "(effect: one of 🔥 👍 👎 ❤️ 🎉 💩, or an effect id; private chats). "
+        "With as_files=true every file arrives as a downloadable document with "
         "its name and bytes unchanged, never shown or played: use it when the user asks for a photo, video or "
         "recording \"as a file\". A file that cannot be delivered (missing, over Telegram's 50 MB limit for "
         "bots, refused by Telegram) is named to the user with the reason, and listed under not_delivered in "
@@ -77,6 +80,15 @@ SEND_SCHEMA: dict[str, Any] = {
             },
             "single_use": {"type": "boolean",
                            "description": "Only the first tap of these choices reaches you (default true)."},
+            "reply_to": {"type": "string", "description": "The text replies to this message: the user's current "
+                                                          "message (the default) or one of yours here."},
+            "quote": {"type": "string", "maxLength": 1024,
+                      "description": "An exact part of the message replied to, shown as a quote."},
+            "link_preview": {"type": "object", "description": "Link preview of the text (not for rich text).",
+                             "properties": {"disabled": {"type": "boolean"}, "url": {"type": "string"},
+                                            "small": {"type": "boolean"}, "large": {"type": "boolean"},
+                                            "above": {"type": "boolean"}}},
+            "effect": {"type": "string", "description": "A message effect: 🔥 👍 👎 ❤️ 🎉 💩, or an effect id."},
             "files": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_FILES,
                       "description": "Absolute paths of the files to send, in order."},
             "as_files": {"type": "boolean",
@@ -169,6 +181,50 @@ def _parse_message(args: dict[str, Any]) -> tuple[str, list[dict[str, str]], boo
     return text.strip(), parsed, bool(args.get("single_use", True))
 
 
+def _parse_extras(args: dict[str, Any]) -> dict[str, Any]:
+    """What the call's text carries besides its buttons: a reply and quote, link preview options, an effect."""
+    from .messages import effect_id
+
+    extras: dict[str, Any] = {}
+    reply_to, quote = args.get("reply_to"), args.get("quote")
+    if reply_to not in (None, ""):
+        if not str(reply_to).isdigit():
+            raise TurnRefused("reply_to must be a message id.")
+        extras["reply_to"] = str(reply_to)
+    if quote not in (None, ""):
+        if not isinstance(quote, str) or len(quote) > 1024:
+            raise TurnRefused("quote must be an exact part of the message replied to, at most 1024 characters.")
+        extras["quote"] = quote
+    preview = args.get("link_preview")
+    if preview not in (None, {}):
+        if not isinstance(preview, dict) or not set(preview) <= {"disabled", "url", "small", "large", "above"}:
+            raise TurnRefused("link_preview takes disabled, url, small, large and above.")
+        if preview.get("url") is not None and not str(preview["url"]).startswith(("https://", "http://")):
+            raise TurnRefused("link_preview url must start with https:// or http://.")
+        extras["link_preview"] = preview
+    if args.get("effect") not in (None, ""):
+        effect = effect_id(str(args["effect"]))
+        if effect is None:
+            raise TurnRefused("effect must be one of 🔥 👍 👎 ❤️ 🎉 💩, or an effect id.")
+        extras["effect"] = effect
+    if extras and not (args.get("text") or "").strip():
+        raise TurnRefused("reply_to, quote, link_preview and effect apply to a text: give text.")
+    return extras
+
+
+def _own_target(adapter: Any, turn: Turn, message_id: str, *, bots_only: bool = False) -> Optional[dict[str, Any]]:
+    """The bot's record of ``message_id`` when it is the bot's, in this conversation; ``None`` for the user's
+    current message (unless ``bots_only``); else ``TurnRefused``. Telegram's methods take only the chat and the
+    message: a message of another topic would be acted on."""
+    if not bots_only and message_id == str(turn.inbound_message_id):
+        return None
+    mine = adapter._bot_message(turn.chat_id, message_id)
+    if mine is None or (mine.get("thread") or None) != (turn.thread_id or None):
+        raise TurnRefused("message_id must be " + ("one of your messages" if bots_only
+                          else "the user's current message or one of your messages") + " in this conversation.")
+    return mine
+
+
 def _resolve(paths: list[str], session_key: str) -> list[tuple[str, str | None, str]]:
     """``(path, resolved path or None, reason)`` per path, by Hermes' own MEDIA resolution. Blocking (a
     remote sandbox fetch); run off any loop, in the tool's context, which carries the turn's profile."""
@@ -194,11 +250,16 @@ async def _admit(adapter: Any, turn: Turn) -> None:
 
 async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | None, str]], as_files: bool,
                    caption: str, message: tuple[str, list[dict[str, str]], bool] = ("", [], True),
-                   ) -> dict[str, Any]:
+                   extras: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Send the plan on the gateway loop; nothing is sent when the turn's cap cannot hold all of it."""
     from gateway.platforms.base import should_send_media_as_audio
 
     admitted: AdmittedTurn = adapter.admitted_turn(turn)
+    extras = dict(extras or {})
+    if "quote" in extras and "reply_to" not in extras:
+        extras["reply_to"] = str(turn.inbound_message_id)  # a quote of the user's current message
+    if "reply_to" in extras:
+        _own_target(adapter, turn, extras["reply_to"])
     deliverable = [(i, path, real) for i, (path, real, _) in enumerate(resolved) if real]
     steps = _plan(deliverable, as_files,
                   lambda ext: should_send_media_as_audio(adapter.platform, ext, is_voice=ext in _VOICE_EXTS))
@@ -208,7 +269,7 @@ async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | Non
     metadata = admitted.metadata
     out: dict[str, Any] = {}
     if text:
-        out["message"] = await _send_text(adapter, turn, admitted, text, buttons, single_use)
+        out["message"] = await _send_text(adapter, turn, admitted, text, buttons, single_use, extras)
         if not out["message"]["sent"] and not resolved:
             return out
     if not resolved:
@@ -234,7 +295,7 @@ async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | Non
 
 
 async def _send_text(adapter: Any, turn: Turn, admitted: AdmittedTurn, text: str, buttons: list[dict[str, str]],
-                     single_use: bool) -> dict[str, Any]:
+                     single_use: bool, extras: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """The call's message, with its buttons bound to it once it is shown; its slot is already reserved."""
     from .buttons import StoreError
 
@@ -244,7 +305,7 @@ async def _send_text(adapter: Any, turn: Turn, admitted: AdmittedTurn, text: str
     except StoreError:
         admitted.give_back(1)
         return {"sent": False, "reason": "its choices could not be recorded, so it was not sent"}
-    sent = await adapter.send_single(turn.chat_id, text, markup, admitted.metadata)
+    sent = await adapter.send_single(turn.chat_id, text, markup, admitted.metadata, **(extras or {}))
     if not getattr(sent, "success", False):
         reason = str(getattr(sent, "error", None) or "not delivered")
         if _ambiguous(sent):
@@ -252,6 +313,8 @@ async def _send_text(adapter: Any, turn: Turn, admitted: AdmittedTurn, text: str
         admitted.give_back(1)
         return {"sent": False, "reason": reason}
     out: dict[str, Any] = {"sent": True, "message_id": sent.message_id}
+    if isinstance(sent.raw_response, dict) and sent.raw_response.get("preview_ignored"):
+        out["note"] = "The text went as a rich message, which takes no link preview options."
     if set_id is not None:
         try:
             adapter._button_store().bind(set_id, sent.message_id, turn.thread_id)
@@ -289,11 +352,12 @@ async def telegram_send(args: dict[str, Any], **_: Any) -> str:
         turn = Turn.current()
         paths, as_files, caption = _parse_send(args)
         message = _parse_message(args)
+        extras = _parse_extras(args)
         runner, adapter = live_adapter()
         await on_gateway_loop(runner, lambda: _admit(adapter, turn))
         resolved = await asyncio.to_thread(_resolve, paths, turn.session_key)
         result = await on_gateway_loop(runner, lambda: as_tool_send(
-            lambda: _deliver(adapter, turn, resolved, as_files, caption, message)))
+            lambda: _deliver(adapter, turn, resolved, as_files, caption, message, extras)))
     except TurnRefused as refused:
         return tool_error(str(refused))
     return json.dumps(result)
@@ -401,13 +465,20 @@ WIDGET_SCHEMA: dict[str, Any] = {
 MESSAGE_SCHEMA: dict[str, Any] = {
     "name": "telegram_message",
     "description": (
-        "Change one of your messages in this Telegram conversation. op=widget_state sets a widget's state "
-        "(TelegramWidget.chatData, up to 1024 bytes); the widget redraws from it. \"\" removes the state."),
+        "Change one of your messages in this Telegram conversation. op=edit replaces a text message's text "
+        "(Markdown, one message long; its buttons stay unless you give new ones). op=delete deletes it. "
+        "op=pin pins it (silently unless notify), op=unpin unpins it. op=widget_state sets a widget's state "
+        "(TelegramWidget.chatData, up to 1024 bytes); the widget redraws from it, and \"\" removes the state. "
+        "None of these counts as an extra message."),
     "parameters": {"type": "object", "properties": {
-        "op": {"type": "string", "enum": ["widget_state"]},
+        "op": {"type": "string", "enum": ["edit", "delete", "pin", "unpin", "widget_state"]},
         "message_id": {"type": "string"},
-        "state": {"type": "string", "maxLength": 1024},
-    }, "required": ["op", "message_id", "state"]},
+        "text": {"type": "string", "description": "For edit: the new text."},
+        "buttons": SEND_SCHEMA["parameters"]["properties"]["buttons"],
+        "single_use": {"type": "boolean", "description": "For edit with buttons (default true)."},
+        "notify": {"type": "boolean", "description": "For pin: notify the user (default false)."},
+        "state": {"type": "string", "maxLength": 1024, "description": "For widget_state: the new state."},
+    }, "required": ["op", "message_id"]},
 }
 
 
@@ -434,12 +505,57 @@ async def _send_widget(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[s
 
 
 async def _change_message(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, Any]:
+    adapter.admitted_turn(turn)
+    op, message_id = args.get("op"), str(args.get("message_id") or "")
+    if op not in ("edit", "delete", "pin", "unpin", "widget_state") or not message_id.isdigit():
+        raise TurnRefused("op must be edit, delete, pin, unpin or widget_state, with the message_id.")
+    if op == "widget_state":
+        return await _set_widget_state(adapter, turn, message_id, args)
+    mine = _own_target(adapter, turn, message_id, bots_only=True)
+    if op == "edit":
+        return await _edit(adapter, turn, message_id, mine or {}, args)
+    if op == "delete":
+        result = await adapter.delete_own(turn.chat_id, message_id)
+    else:
+        result = await adapter.pin(turn.chat_id, message_id, pinned=op == "pin", notify=bool(args.get("notify")))
+    if not result.success:
+        raise TurnRefused(f"The message was not changed ({op}): {result.error}")
+    return {op: True, "message_id": message_id}
+
+
+async def _edit(adapter: Any, turn: Turn, message_id: str, mine: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    from .buttons import StoreError
+
+    if mine.get("kind", "text") != "text":
+        raise TurnRefused("Only a text message can be edited: a file, poll, sticker or widget cannot "
+                          "(for a widget, set its state with op=widget_state).")
+    text, buttons, single_use = _parse_message({k: args[k] for k in ("text", "buttons", "single_use") if k in args})
+    if not text:
+        raise TurnRefused("edit needs the new text.")
+    markup, set_id = None, None
+    if buttons:
+        try:
+            markup, set_id = adapter.button_markup(turn.chat_id, buttons, single_use=single_use, profile=turn.profile)
+        except StoreError:
+            raise TurnRefused("The new buttons could not be recorded, so the message was not edited.") from None
+    result = await adapter.edit_text(turn.chat_id, message_id, text, markup)
+    if not result.success:
+        raise TurnRefused(f"The message was not edited: {result.error}")
+    if markup is not None:
+        try:
+            store = adapter._button_store()
+            store.retire(turn.chat_id, message_id)  # the old keyboard is gone
+            if set_id is not None:
+                store.bind(set_id, message_id, turn.thread_id)
+        except StoreError:
+            return {"edited": True, "message_id": message_id,
+                    "note": "Its new choices could not be recorded: taps on them will not reach you."}
+    return {"edited": True, "message_id": message_id}
+
+
+async def _set_widget_state(adapter: Any, turn: Turn, message_id: str, args: dict[str, Any]) -> dict[str, Any]:
     from .widgets import check_state
 
-    adapter.admitted_turn(turn)
-    message_id = str(args.get("message_id") or "")
-    if args.get("op") != "widget_state" or not message_id.isdigit():
-        raise TurnRefused("op must be widget_state, with the widget's message_id.")
     if "state" not in args:
         raise TurnRefused("state is required: the widget's new state, or \"\" to remove it.")
     why = check_state(args["state"])
@@ -495,12 +611,7 @@ async def _react(adapter: Any, turn: Turn, emoji: str, message_id: Optional[str]
     target = str(message_id or turn.inbound_message_id)
     if not target.isdigit():
         raise TurnRefused("This turn has no message of its own to react to: give message_id.")
-    if target != str(turn.inbound_message_id):
-        # Telegram takes only the chat and the message: a message of another topic would get it.
-        mine = adapter._bot_message(turn.chat_id, target)
-        if mine is None or (mine.get("thread") or None) != (turn.thread_id or None):
-            raise TurnRefused("message_id must be the user's current message or one of your messages in this "
-                              "conversation.")
+    _own_target(adapter, turn, target)
     result = await adapter.react(turn.chat_id, str(target), emoji)
     if not result.success:
         raise TurnRefused(f"The reaction was not set: {result.error}")
