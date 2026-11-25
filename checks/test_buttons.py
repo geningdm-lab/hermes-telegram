@@ -63,3 +63,26 @@ def test_buttons_need_a_text_to_go_under():
 def test_a_button_without_a_target_is_a_choice_of_its_label():
     assert tools._parse_message({"text": "Pick", "buttons": [{"label": "Paris"}]}) == (
         "Pick", [{"label": "Paris", "value": "Paris"}], True)
+
+
+def test_a_tap_is_routed_by_the_user_who_tapped(tmp_path):
+    # docs/design.md, Events: a tap by the routed family user reaches the family profile. The route itself is
+    # the gateway's (profile_routes); what the adapter owns is building the tap's source from the tapper.
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from telegram import CallbackQuery, Chat, Message, User
+
+    from gateway.config import PlatformConfig
+    from hermes_telegram.adapter import HermesTelegramAdapter
+
+    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token="1:x"))
+    adapter.gateway_runner = SimpleNamespace(
+        _profile_name_for_source=lambda source, adapter_profile=None: "family" if source.user_id == "222" else None)
+    message = Message(message_id=5, date=datetime.now(), chat=Chat(id=222, type="private"))
+    tapper = User(id=222, first_name="Kid", is_bot=False)
+    query = CallbackQuery(id="901", from_user=tapper, chat_instance="i", message=message, data="tb:x")
+    event = adapter._tap_event(query, message, {"label": "Yes", "value": "yes"})
+    assert (event.source.profile, event.source.user_id, event.text) == (
+        "family", "222", '[button] "Yes" value="yes" on message 5')
+    assert event.message_id == "cb901" and event.reply_anchor_override == "5"

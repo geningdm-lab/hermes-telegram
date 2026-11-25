@@ -202,6 +202,15 @@ Rules:
 - A widget query is answered at once with an acknowledgement, because Telegram allows 15 s. The agent's real answer arrives as a chat message, or as new widget state through `telegram_message`.
 - Pressing Stop is not an event for the agent: it stops the turn (next section).
 
+How slice 4 does it (`hermes_telegram/buttons.py`, `hermes_telegram/actions.py`, `hermes_telegram/tools.py`):
+
+- `telegram_send` takes `text` and `buttons` (one per row; each a choice with `value`, a link with `url`, or `copy`; an optional `style`) and `single_use` (default true). The message is one rich message carrying its inline keyboard, or MarkdownV2 with the same keyboard when Telegram refuses the rich one.
+- A choice's callback data is `tb:<token>`; the token's label, value and set are kept in `telegram_buttons.json` under the profile's Hermes home, at most 4000 tokens. A tap is checked by the same gate as Hermes' own buttons, then claimed with no await between the check and the mark, so two taps cannot both be first; a single-use set answers later taps with "Already answered", and an unknown token with "This choice has expired".
+- A tap, a poll answer or a reaction becomes an inbound message built with `build_source` from the user who acted, so the gateway's profile routes and authorization apply as for their text, passed to `handle_message`. It has an id of its own (`cb<callback id>`, `pa<update id>`, `re<update id>`): reusing the bot message's id made Hermes drop a second tap. The answer still replies to the message acted on (`reply_anchor_override`).
+- `telegram_poll` sends a non-anonymous poll, so Telegram reports who answered, or a quiz with `correct_option_ids` (Bot API 9.x renamed the field; python-telegram-bot 22.8 knows only the old name, so it goes as an extra argument). Polls are kept in `telegram_polls.json` to map an answer back to its chat.
+- `telegram_react` sets an emoji reaction, by default on the user's current message. Reactions to the bot's own messages, which the adapter remembers as it sends them, come back to the agent; others do not. Telegram documents `message_reaction` for chats where the bot is an administrator; whether it arrives in a private chat is live acceptance.
+- `telegram_sticker`: `find` searches the catalog (the stickers users sent, recorded with their `file_id` after Hermes describes them, and the stickers of `extra.sticker_sets`, read once with getStickerSet) by emoji, description words and set name; `send` sends one of them. A sticker or a poll counts towards the cap; a reaction does not, as it is no message.
+
 ## Turn lifecycle
 
 States of the preview of one turn in a private chat: `thinking`, then `streaming`, then exactly one of `final`, `stopped` or `failed`.
@@ -243,7 +252,7 @@ Each slice is one PR to `main`, reviewed by the owner.
 1. Rich answers: rows 1, 2, 16.
 2. Files: rows 3, 4, 5, 15, and the cause of today's failed sends.
 3. Lifecycle: rows 6 to 10, 17, and streamed answers as rich messages: block-aware heads while a long answer streams. A final the gateway edits into a preview happens only where there are no drafts, in groups, which are out of scope. Clarify gets its end-to-end check here, as it uses the prompt sender this slice wraps; a cron report during a preview is checked at the adapter, since it is an ordinary send. The `family` route is checked in slice 4, which routes taps.
-4. Buttons, polls, reactions, stickers and their events: row 11.
+4. Buttons, polls, reactions, stickers and their events: row 11. The `family` route of a tap is checked at the adapter (the tap's source is built from the user who tapped, which is what the gateway's profile routes read); a run through a multiplexed gateway is live acceptance.
 5. Widgets: rows 12 to 14.
 6. The rest of the agent surface: effects, pins, edits, link previews, quote replies.
 
