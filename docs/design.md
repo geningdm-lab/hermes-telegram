@@ -1,6 +1,6 @@
 # Design: hermes-telegram
 
-Status: draft for owner review. Date: 2026-11-25.
+Status: draft for owner review, all questions answered. Date: 2026-11-25.
 
 ## Why
 
@@ -198,10 +198,9 @@ Decided by the owner on PR #1, 2026-11-25:
 
 1. Maths renders as LaTeX ("1 - LaTeX"). Row 1 is amended accordingly.
 2. The tool set stands, plus stickers ("Норм, я бы еще стикеры добавил бы").
+3. The three guards under Tools (no recipient chosen by the model, only in user-started Telegram turns, a cap per turn) are the accepted reading of Hermes' rule against a general send tool ("Yes, guards are fine").
 
-Open:
-
-3. Do the three guards under Tools (no recipient chosen by the model, only in user-started Telegram turns, a cap per turn) satisfy you as the reading of Hermes' rule against a general send tool?
+No questions are open.
 
 ## Out of scope
 
