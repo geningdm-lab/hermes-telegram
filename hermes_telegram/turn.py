@@ -12,8 +12,10 @@ docs/design.md (Agent interface, Tools) sets three guards, which every tool here
 
 ``Turn`` is what a tool reads from Hermes' session context (``gateway/session_context.py``) on its own
 thread; ``AdmittedTurn`` is the adapter's record, read on the gateway loop. Sends use the record's routing
-metadata, built by Hermes' own ``_thread_metadata_for_event``, so a DM-topic send keeps the topic marker
-and reply anchor and fails rather than leave the topic.
+metadata, built by Hermes' own ``_thread_metadata_for_event``. A tool's send keeps the turn's topic: while
+``TOOL_SEND`` is set, the fallbacks that ordinary delivery has (a media send retried without its topic when
+the reply anchor or the topic is gone, a text sent to the root chat when its forum topic is not found) do
+not apply, and the send fails instead.
 
 Reaching the live adapter follows Hermes' own send tool (``tools/send_message_senders.py:_live_adapter``):
 the gateway runner, then the adapter of the active profile, which under ``multiplex_profiles`` is the
@@ -22,6 +24,7 @@ calls are scheduled on the gateway's loop, as ``tools/send_message_tool.py:_disp
 """
 
 import asyncio
+import contextvars
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -32,6 +35,9 @@ MAX_SENDS_PER_TURN = 10
 _TURN_MEMORY = 4096
 
 T = TypeVar("T")
+
+# Set while a tool's own sends run on the gateway loop (``as_tool_send``).
+TOOL_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar("hermes_telegram_tool_send", default=False)
 
 
 class TurnRefused(Exception):
@@ -137,6 +143,21 @@ class HumanTurnsMixin:
             self._human_turns().pop(_event_key(source.chat_id, message_id), None)
         await super().on_processing_complete(event, outcome)
 
+    @classmethod
+    def _should_retry_without_dm_topic_reply_anchor(cls, error: Exception, metadata: Any,
+                                                    reply_to_message_id: Any) -> bool:
+        if TOOL_SEND.get():
+            return False  # a tool's send fails rather than leave the turn's topic
+        return super()._should_retry_without_dm_topic_reply_anchor(error, metadata, reply_to_message_id)
+
+    @staticmethod
+    def _is_thread_not_found_error(error: Exception) -> bool:
+        """Under ``TOOL_SEND`` a missing topic is an ordinary refusal: ``send`` then fails instead of
+        retrying in the root chat."""
+        from .harvested.adapter_core import CoreMixin
+
+        return not TOOL_SEND.get() and CoreMixin._is_thread_not_found_error(error)
+
     def admitted_turn(self, turn: Turn) -> AdmittedTurn:
         """The record of the human event ``turn`` runs for, or ``TurnRefused``. On the gateway loop."""
         admitted = self._human_turns().get(_event_key(turn.chat_id, turn.inbound_message_id))
@@ -160,6 +181,15 @@ def live_adapter() -> tuple[Any, Any]:
     if adapter is None:
         raise TurnRefused("This profile has no Telegram adapter.")
     return runner, adapter
+
+
+async def as_tool_send(make: Callable[[], Awaitable[T]]) -> T:
+    """``make()`` with ``TOOL_SEND`` set, in the task that runs it."""
+    token = TOOL_SEND.set(True)
+    try:
+        return await make()
+    finally:
+        TOOL_SEND.reset(token)
 
 
 async def on_gateway_loop(runner: Any, make: Callable[[], Awaitable[T]]) -> T:

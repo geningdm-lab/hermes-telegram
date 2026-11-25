@@ -8,7 +8,6 @@ model can answer it. What a scenario asserts is what Telegram received and what 
 
 import json
 import sys
-import time
 from typing import Any
 
 import pytest
@@ -59,7 +58,7 @@ def test_a_choice_reaches_the_agent_once_and_a_second_tap_says_already_answered(
     second = rig.drv.click(inbound.chat_id, rome)
     wait_until(lambda: rig.drv.click_answered(second), "the second tap answered", timeout=C.TURN_TIMEOUT,
                on_timeout=rig.ctx)
-    time.sleep(3.0)  # a second turn would have started by now
+    C.barrier(rig, "ac-chosen-barrier")  # a turn for the second tap would have been handled before it
     assert C.turns(rig, chosen) == 1, "the agent received the choice more than once"
     assert _last_user_text(rig, chosen).endswith(
         f'[button] "Paris" value="paris [in:{chosen}]" on message {paris["message_id"]}')
@@ -137,7 +136,11 @@ def test_a_reaction_to_the_users_own_message_does_not_reach_the_agent(rig):
     inbound = rig.drv.dm(f"hello [in:{token}]")
     C.wait_reply(rig, inbound.chat_id, "A-ac-own")
     rig.drv.standin.react(int(rig.drv.user_id), inbound.chat_id, int(inbound.message_id), "❤")
-    time.sleep(3.0)
+    answer = next(v for v in rig.drv.visible(inbound.chat_id) if C.head("A-ac-own") in C.norm(v.text))
+    rig.drv.standin.react(int(rig.drv.user_id), inbound.chat_id, int(answer.message_id), "🎉")
+    # The reaction to the agent's own answer, sent after, reaching it shows the first one was handled.
+    wait_until(lambda: _requests_with_user_text(rig, f"[reaction] 🎉 on message {answer.message_id}"),
+               "the later reaction reaching the agent", timeout=C.TURN_TIMEOUT, on_timeout=rig.ctx)
     assert not _requests_with_user_text(rig, f"[reaction] ❤ on message {inbound.message_id}")
 
 
