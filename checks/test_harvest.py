@@ -45,6 +45,9 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "send_multiple_images": "FilesMixin",
     "send_video": "FilesMixin",
     "send_voice": "FilesMixin",
+    # Slice 3, hermes_telegram/updates.py: copies with one argument changed (test below).
+    "_start_polling_once": "UpdateKindsMixin",
+    "_start_webhook_mode": "UpdateKindsMixin",
 }
 
 
@@ -204,3 +207,21 @@ def test_module_loggers_keep_their_upstream_names(module: str):
         assert ours.logger.name == "hermes_telegram.adapter"
     else:
         assert ours.logger.name == theirs.logger.name
+
+
+class _WidenUpdates(ast.NodeTransformer):
+    """The one change hermes_telegram/updates.py makes: ``Update.ALL_TYPES`` -> ``allowed_updates()``."""
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        if isinstance(node.value, ast.Name) and node.value.id == "Update" and node.attr == "ALL_TYPES":
+            return ast.Call(func=ast.Name("allowed_updates", ast.Load()), args=[], keywords=[])
+        return self.generic_visit(node)
+
+
+@pytest.mark.parametrize("name", ["_start_polling_once", "_start_webhook_mode"])
+def test_the_update_kinds_overrides_differ_from_the_harvested_methods_only_in_the_update_list(name: str):
+    # An upstream change to either method changes the harvested copy, and this fails until updates.py follows.
+    from hermes_telegram.updates import UpdateKindsMixin
+
+    harvested = _WidenUpdates().visit(_member_tree(vars(_harvested_members()[name])[name]))
+    assert _dump(_member_tree(vars(UpdateKindsMixin)[name])) == _dump(ast.fix_missing_locations(harvested))
