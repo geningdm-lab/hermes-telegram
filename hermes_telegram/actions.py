@@ -84,6 +84,17 @@ class _JsonStore:
         except Exception as exc:
             raise StoreError(f"the store at {self.path} could not be saved: {exc}") from exc
 
+    def drop(self, key: str) -> None:
+        """Forget ``key``; ``StoreError`` when that could not be saved."""
+        from utils import atomic_json_write
+
+        if self.data.pop(key, None) is None:
+            return
+        try:
+            atomic_json_write(self.path, self.data)
+        except Exception as exc:
+            raise StoreError(f"the store at {self.path} could not be saved: {exc}") from exc
+
 
 def sticker_matches(catalog: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
     """Stickers of ``catalog`` best matching ``query``: an emoji in it, then words of the description and
@@ -102,6 +113,8 @@ def sticker_matches(catalog: list[dict[str, Any]], query: str, limit: int = 8) -
 
 def _sent_ids(result: Any) -> list[Any]:
     """Every message id a send reports as delivered, partly delivered sends included."""
+    if isinstance(result, (str, int)):  # a message id
+        return [str(result)]
     if not hasattr(result, "success"):  # a Telegram Message
         return [getattr(result, "message_id", None)]
     raw = result.raw_response if isinstance(result.raw_response, dict) else {}
@@ -162,21 +175,34 @@ class ActionsMixin:
 
     # --- the bot's own messages, for reactions ----------------------------------------------------------
 
-    def _remember_bot_messages(self, chat_id: Any, results: Any, thread_id: Any = None) -> None:
+    def _remember_bot_messages(self, chat_id: Any, results: Any, thread_id: Any = None, *, kind: str = "text",
+                               markup: Optional[dict[str, Any]] = None) -> None:
+        """Keep the bot's sent messages with their topic, their kind (``text``, ``media``, ``prompt``,
+        ``widget``) and a tool message's keyboard, which an edit keeps (slice 6)."""
         store = self._store("bot_messages", _BOT_MESSAGE_MEMORY)
         for result in results if isinstance(results, (list, tuple)) else [results]:
             for mid in _sent_ids(result):
                 if mid is None:
                     continue
+                record: dict[str, Any] = {"thread": str(thread_id) if thread_id else None, "kind": kind}
+                if markup:
+                    record["markup"] = markup
                 try:
-                    store.put(f"{chat_id}:{mid}", {"thread": str(thread_id) if thread_id else None})
+                    store.put(f"{chat_id}:{mid}", record)
                 except StoreError:
                     logger.warning("[%s] a sent message could not be remembered for reactions", self.name,
                                    exc_info=True)
 
     def _bot_message(self, chat_id: Any, message_id: Any) -> Optional[dict[str, Any]]:
-        """``{"thread": ...}`` when ``message_id`` is one of the bot's messages in ``chat_id``."""
+        """``{"thread": ..., "kind": ...}`` when ``message_id`` is one of the bot's messages in ``chat_id``.
+        Records kept before slice 6 have no kind."""
         return self._store("bot_messages", _BOT_MESSAGE_MEMORY).data.get(f"{chat_id}:{message_id}")
+
+    def _forget_bot_message(self, chat_id: Any, message_id: Any) -> None:
+        try:
+            self._store("bot_messages", _BOT_MESSAGE_MEMORY).drop(f"{chat_id}:{message_id}")
+        except StoreError:
+            logger.warning("[%s] a deleted message could not be forgotten", self.name, exc_info=True)
 
     def _is_bot_message(self, chat_id: Any, message_id: Any) -> bool:
         return self._bot_message(chat_id, message_id) is not None
@@ -193,7 +219,8 @@ class ActionsMixin:
                                                      reset_media: Optional[Any] = None) -> Any:
         sent = await super()._send_with_dm_topic_reply_anchor_retry(send_fn, send_kwargs, metadata,
                                                                     reply_to_message_id, media_label, reset_media)
-        self._remember_bot_messages(send_kwargs.get("chat_id"), sent, self._metadata_thread_id(metadata))
+        self._remember_bot_messages(send_kwargs.get("chat_id"), sent, self._metadata_thread_id(metadata),
+                                    kind="media")
         return sent
 
     @staticmethod
@@ -211,7 +238,7 @@ class ActionsMixin:
     async def _send_control_message(self, chat_id: str, text: str, *, thread_id: Optional[str],
                                     **kwargs: Any) -> Any:
         sent = await super()._send_control_message(chat_id, text, thread_id=thread_id, **kwargs)
-        self._remember_bot_messages(chat_id, sent, thread_id)
+        self._remember_bot_messages(chat_id, sent, thread_id, kind="prompt")
         return sent
 
     # --- polls --------------------------------------------------------------------------------------------

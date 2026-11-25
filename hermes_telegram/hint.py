@@ -20,6 +20,8 @@ PLATFORM_HINT = (
     "telegram_react reacts with an emoji, telegram_sticker finds and sends stickers. What the user does with "
     "them comes back as a message: [button] \"<label>\" value=\"<value>\" on message <id>, "
     "[poll] \"<question>\": \"<option>\", or [reaction] <emoji> on message <id>. "
+    "telegram_send can also reply to a message quoting part of it, and add a message effect; telegram_message "
+    "edits, deletes, pins or unpins one of your messages. "
     "Draw diagrams, charts, step-by-step explanations and UI prototypes as widgets with telegram_widget: one "
     "self-contained HTML document with inline CSS, JavaScript and SVG, no network; a request it sends with "
     "TelegramWidget.request(data) on the user's action comes back as [widget] data=\"<data>\" on widget <id>. "

@@ -9,9 +9,12 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+from telegram.error import TimedOut
+
 from gateway.config import PlatformConfig
 from gateway.platforms.base import MessageEvent
 from hermes_telegram.adapter import HermesTelegramAdapter
+from hermes_telegram.buttons import PREFIX
 
 OWNER, KID, STRANGER = "111", "222", "333"
 
@@ -56,6 +59,23 @@ class Bot:
         await self._call("setMessageReaction", kwargs)
         return True
 
+    async def edit_message_text(self, **kwargs: Any) -> Any:
+        kwargs.update(kwargs.pop("api_kwargs", None) or {})
+        await self._call("editMessageText", kwargs)
+        return SimpleNamespace(message_id=kwargs.get("message_id"))
+
+    async def delete_message(self, **kwargs: Any) -> bool:
+        await self._call("deleteMessage", kwargs)
+        return True
+
+    async def pin_chat_message(self, **kwargs: Any) -> bool:
+        await self._call("pinChatMessage", kwargs)
+        return True
+
+    async def unpin_chat_message(self, **kwargs: Any) -> bool:
+        await self._call("unpinChatMessage", kwargs)
+        return True
+
     async def get_sticker_set(self, name: str) -> Any:
         await self._call("getStickerSet", {"name": name})
         return SimpleNamespace(name=name, title=name.title(), stickers=[
@@ -77,3 +97,29 @@ def build_adapter(home, **extra: Any) -> HermesTelegramAdapter:
 
 def user(user_id: str) -> Any:
     return SimpleNamespace(id=int(user_id), is_bot=False, full_name=f"User {user_id}", first_name="User")
+
+
+def message(chat_id: str, message_id: Any, thread_id: Any = None, chat_type: str = "private") -> Any:
+    return SimpleNamespace(message_id=int(message_id), chat_id=int(chat_id),
+                           chat=SimpleNamespace(id=int(chat_id), type=chat_type),
+                           message_thread_id=int(thread_id) if thread_id else None,
+                           is_topic_message=bool(thread_id))
+
+
+class Query(SimpleNamespace):
+    """A tap; ``answer`` is Telegram's acknowledgement, which can fail."""
+
+    async def answer(self, text: str | None = None) -> None:
+        self.answers.append(text)
+        if self.answer_fails:
+            raise TimedOut("query is too old")
+
+
+_queries = iter(range(1, 10_000))
+
+
+async def tap(adapter, user_id: str, message: Any, token: str, *, answer_fails: bool = False) -> Query:
+    query = Query(id=str(next(_queries)), data=PREFIX + token, from_user=user(user_id), message=message,
+                  answers=[], answer_fails=answer_fails)
+    await adapter._handle_callback_query(SimpleNamespace(callback_query=query), None)
+    return query

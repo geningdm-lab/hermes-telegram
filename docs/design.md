@@ -174,7 +174,7 @@ Hermes forbids plugins to give the model a tool that lets it send messages on it
 | Tool | Does | Returns |
 |---|---|---|
 | `telegram_status(text)` | Sets the preview's status line; the default is `Contemplating...` (slice 3) | whether a preview shows it |
-| `telegram_send(text?, files?, as_files?, buttons?, reply_to?)` | Sends one message now: a rich body, attachments (several photos go as one album, more than 10 as consecutive albums), buttons | message ids |
+| `telegram_send(text?, files?, as_files?, buttons?, reply_to?, quote?, link_preview?, effect?)` | Sends one message now: a rich body, attachments (several photos go as one album, more than 10 as consecutive albums), buttons; the text may reply with a quote, set link preview options and carry an effect (slice 6) | message ids |
 | `telegram_widget(html, caption, height?)` | Sends a widget after checking its size, its compressed size and the sandbox rules (no network APIs, no external resources) | message id, or the reason it was refused |
 | `telegram_poll(question, options, quiz_answer?, multiple?)` | Sends a poll or a quiz | message id |
 | `telegram_react(emoji, message_id?)` | Reacts to a message, by default the user's current one | ok |
@@ -201,6 +201,14 @@ Rules:
 - Each callback, widget query and update is handled once: a redelivered copy is dropped. A button set marked single-use answers its second tap with "already answered" and sends nothing to the agent (row 11).
 - A widget query is answered at once with an acknowledgement, because Telegram allows 15 s. The agent's real answer arrives as a chat message, or as new widget state through `telegram_message`.
 - Pressing Stop is not an event for the agent: it stops the turn (next section).
+
+How slice 6 does it (`hermes_telegram/messages.py`, `hermes_telegram/buttons.py`, `hermes_telegram/tools.py`):
+
+- `telegram_message` changes only the bot's own messages in the turn's conversation, by the bot-message index of slice 4 (the chat and topic each was sent to), since Telegram's methods take a chat and a message but no topic. The index now also keeps each message's kind (`text`, `media`, `prompt`, `widget`) and a tool message's keyboard.
+- `op=edit` replaces the text of a text message with `editMessageText`, decided as `send_single` decides (rich when an answer would be, else MarkdownV2, one message long). Its keyboard stays unless new buttons are given; new buttons retire the old set, whose taps then answer "expired". "message is not modified" is an edit made. Files, polls, stickers, widgets and Hermes' prompts are not edited.
+- `op=delete` deletes the message and forgets it; `op=pin` pins it silently unless `notify`; `op=unpin` unpins it. None of these counts towards the cap.
+- `telegram_send` with text: `reply_to` replies to the user's current message (the default for a `quote`) or one of the bot's messages in this conversation; `quote` is `ReplyParameters.quote`, which Telegram refuses unless it is an exact part of that message, and the refusal comes back to the agent. `link_preview` (disabled, url, small, large, above) becomes LinkPreviewOptions on a MarkdownV2 message, defaulting to the profile's `disable_link_previews`; `sendRichMessage` takes no link preview options, and the tool result says so when the text went rich. `effect` is `message_effect_id`, private chats only.
+- Effects: the Bot API has no method that lists them. `EFFECTS` names six ids that Telegram's clients offer (🔥 👍 👎 ❤️ 🎉 💩); they are client evidence, not documentation, and their delivery is live acceptance. Any other numeric id is passed on, and a refusal comes back to the agent. Owner question, open: keep the six ids, or take raw ids only.
 
 How slice 5 does it (`hermes_telegram/widgets.py`, `hermes_telegram/tools.py`):
 
@@ -282,6 +290,10 @@ Decided by the owner in chat, 2026-11-25:
 
 5. The `telegram` tools in a Telegram session. The owner: the session knows it is a Telegram one, so that knowledge should be in its context ("сессия знает когда она пользуется телеграмом и тогда у него должны были эти знания в контексте"). Hermes at the pin has no per-plugin switch to keep a plugin's tools out of tool search (`tools/tool_search.py:150-162`; the only switch is `tools.tool_search.enabled: off`, which makes every tool eager). In a Telegram session the knowledge is in context already: the platform hint names `telegram_send` and `telegram_status`, and the tool search listing carries each deferred tool's name and first sentence; only the full schema loads on the first call. Asked between keeping that, turning tool search off for the profile, and asking Hermes upstream for a per-plugin option, the owner chose to keep the bridge.
 6. After Telegram's reply to a final answer is lost, Hermes' delivery ledger resends it later with a "may be a duplicate" marker. The owner: keep it, a resend is better ("согласен, лучше переотправить"). The finding disputed in the slice 2 review stays as it is (docs/review-log.md).
+
+Open, asked 2026-11-25:
+
+7. Message effects (slice 6). The Bot API documents `message_effect_id` but no list of effects. The plugin ships the six ids Telegram's clients offer for 🔥 👍 👎 ❤️ 🎉 💩, marked unverified until live acceptance, and also takes raw ids. The alternative is raw ids only, which leaves the agent guessing ids.
 
 ## Out of scope
 
