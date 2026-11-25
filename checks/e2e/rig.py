@@ -52,7 +52,7 @@ from tests.e2e.core.platforms import _suite  # noqa: E402
 from tests.e2e.core.platforms._drv_telegram import TelegramDriver  # noqa: E402
 from tests.e2e.core.platforms._helpers import GatewayUnderTest  # noqa: E402
 
-from checks.e2e.standin import RichTelegramStandin  # noqa: E402  (imports Hermes' stand-in)
+from checks.e2e.standin import MediaTelegramStandin  # noqa: E402  (imports Hermes' stand-in)
 
 __all__ = ["C", "PluginGatewayUnderTest", "PluginTelegramDriver", "rig_fixtures"]
 
@@ -69,7 +69,7 @@ class PluginTelegramDriver(TelegramDriver):
     _polls_before_start = 0
 
     def __init__(self) -> None:
-        self.standin = RichTelegramStandin()
+        self.standin = MediaTelegramStandin()
 
     def gateway_config(self) -> dict[str, Any]:
         return C.merge(super().gateway_config(), {"plugins": {"enabled": ["platforms/telegram"]}})

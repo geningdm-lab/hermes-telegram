@@ -38,9 +38,13 @@ OWN = {
 class _Ctx:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] = {}
+        self.tools: dict[str, dict[str, Any]] = {}
 
     def register_platform(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+
+    def register_tool(self, **kwargs: Any) -> None:
+        self.tools[kwargs["name"]] = kwargs
 
 
 def _registered(register_fn) -> dict[str, Any]:
@@ -159,3 +163,11 @@ def test_hint_allows_tables_and_keeps_the_bundled_media_instructions():
     assert "no tables" in bundled and "no tables" not in hint
     media = bundled[bundled.index("You can send files natively"):]
     assert hint.endswith(media)
+
+
+def test_the_plugin_registers_its_agent_tools_in_the_telegram_toolset():
+    ctx = _Ctx()
+    register(ctx)
+    assert sorted(ctx.tools) == ["telegram_send"]
+    assert {t["toolset"] for t in ctx.tools.values()} == {"telegram"}
+    assert all(t["is_async"] for t in ctx.tools.values())
