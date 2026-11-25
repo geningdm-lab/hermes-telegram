@@ -3,21 +3,32 @@
 The harvested outbound path already sends one rich message for a few constructs, behind the ``rich_messages``
 opt-in, and falls back to MarkdownV2 when Telegram refuses it. This mixin changes what goes there and how
 much: rich is on unless ``rich_messages: false``; any structure counts (``rich.needs_rich``); the Markdown
-sent is ``rich.prepare_markdown``'s; and an answer over one message's limits is cut into consecutive rich
-messages instead of falling back to MarkdownV2 chunks.
+sent is ``rich.prepare_markdown``'s; and every rich answer goes through ``_send_items``, which cuts it to
+Telegram's limits, sends a refused part again smaller, and resumes only parts certainly not delivered.
+
+Streaming (previews that the gateway edits, heads it seals while a long answer streams) still takes the
+harvested path; slice 3 owns it (docs/review-log.md, slice 1).
 """
 
+import asyncio
+import re
 from collections import deque
 from typing import Any, Optional
 
 from gateway.platforms.base import SendResult, utf16_len
 
 from . import rich
-from .harvested.adapter_module import _flood_cap_result, _rich_normalize_linebreaks
+from .harvested.adapter_module import (
+    _flood_cap_result,
+    _iter_exception_graph,
+    _separate_chunk_indicator_from_fence,
+)
 
-# An item of a cut answer still to send: ("rich", markdown, splits so far) or ("plain", MarkdownV2 chunk, 0).
+# An item still to send: ("rich", prepared markdown, times cut so far) or ("plain", MarkdownV2 chunk, 0).
 Item = tuple[str, str, int]
 _MAX_RESPLITS = 2
+# Below this a refused part is not cut further: it goes as MarkdownV2 chunks.
+_MIN_PART_CHARS = 1000
 
 
 class RichAnswersMixin:
@@ -33,18 +44,20 @@ class RichAnswersMixin:
     def _needs_rich_rendering(self, content: str) -> bool:
         return rich.needs_rich(content)
 
-    def _rich_markdown(self, content: str) -> str:
-        return _rich_normalize_linebreaks(rich.prepare_markdown(content))
-
     def _rich_message_payload(self, content: str, *, skip_entity_detection: bool = False) -> dict[str, Any]:
-        payload: dict[str, Any] = {"markdown": self._rich_markdown(content)}
+        payload: dict[str, Any] = {"markdown": rich.prepare_markdown(content)}
         if skip_entity_detection:
             payload["skip_entity_detection"] = True
         return payload
 
     def _content_fits_rich_limits(self, content: str) -> bool:
         """The message Telegram receives fits: its prepared Markdown, not the agent's text, is measured."""
-        return len(self._rich_markdown(content)) <= rich.MAX_CHARS and rich.estimate_blocks(content) <= rich.MAX_BLOCKS
+        prepared = rich.prepare_markdown(content)
+        return len(prepared) <= rich.MAX_CHARS and rich.estimate_blocks(prepared) <= rich.MAX_BLOCKS
+
+    def format_message(self, content: str) -> str:
+        """The ordinary (MarkdownV2) path shows ``\\$`` as written, so the hint's escape is undone first."""
+        return super().format_message(rich.unescape_dollars(content))
 
     def _rich_eligible_any_length(self, content: str) -> bool:
         """``_rich_eligible`` without the one-message size check: a long answer is cut, not degraded."""
@@ -58,30 +71,31 @@ class RichAnswersMixin:
                  or not self._has_telegram_desktop_cjk_rich_garble_shape(content))
             and self._bot_supports_rich())
 
-    def _rich_parts(self, content: str) -> list[str]:
-        """``content`` cut so that each part's prepared Markdown fits one rich message."""
-        return [fitted for part in rich.split_markdown(content) for fitted in self._fit_part(part, rich.CHAR_BUDGET)]
+    @staticmethod
+    def _rich_parts(prepared: str) -> list[str]:
+        return rich.split_markdown(prepared)
 
-    def _fit_part(self, part: str, budget: int, depth: int = 0) -> list[str]:
-        # Escapes and hard line breaks make the sent Markdown longer than the part: cut again if they push
-        # it over the limit.
-        size = len(self._rich_markdown(part))
-        if size <= rich.MAX_CHARS or depth >= 3:
-            return [part]
-        smaller = max(1000, int(budget * rich.MAX_CHARS / size * 0.9))
-        return [p for sub in rich.split_markdown(part, char_budget=smaller)
-                for p in self._fit_part(sub, smaller, depth + 1)]
+    def _rich_transient_result(self, exc: Exception, what: str, *, retry_after: Any = None) -> SendResult:
+        """The harvested result, marked when the part was certainly not delivered.
+
+        Certain: Telegram refused it (a flood wait), or the connection never opened. Not certain: a timeout
+        or a connection lost after the request went out; Telegram may have shown the part."""
+        result = super()._rich_transient_result(exc, what, retry_after=retry_after)
+        unsent = retry_after is not None or self._looks_like_connect_timeout(exc) or any(
+            "connecterror" in cur.__class__.__name__.lower() or "connecterror" in str(cur).lower()
+            for cur in _iter_exception_graph(exc))
+        raw = dict(result.raw_response) if isinstance(result.raw_response, dict) else {}
+        raw["certainly_unsent"] = bool(unsent)
+        result.raw_response = raw
+        return result
 
     # --- sending ----------------------------------------------------------------------------------------
 
     async def _send_text_locked(
             self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]
     ) -> SendResult:
-        """A long rich answer goes as several rich messages; everything else takes the harvested path."""
+        """Every rich answer goes through ``_send_items``; everything else takes the harvested path."""
         if (metadata or {}).get("expect_edits") or not self._rich_eligible_any_length(content):
-            return await super()._send_text_locked(chat_id, content, reply_to, metadata)
-        parts = self._rich_parts(content)
-        if len(parts) == 1:
             return await super()._send_text_locked(chat_id, content, reply_to, metadata)
         thread_id = self._metadata_thread_id(metadata)
         if self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id) is None:
@@ -90,78 +104,100 @@ class RichAnswersMixin:
         cooldown = self._send_flood_cooldown_remaining(chat_id)
         if cooldown is not None:
             return _flood_cap_result(cooldown)
+        parts = self._rich_parts(rich.prepare_markdown(content))
         return await self._send_items(chat_id, deque(("rich", p, 0) for p in parts), [], reply_to, metadata)
 
     async def _pace(self, chat_id: str) -> None:
-        import asyncio
-
         remaining = self._chat_outbound_slot_remaining(chat_id)
         if remaining > 0:
             await asyncio.sleep(remaining)
         self._hold_chat_outbound_slot(chat_id)
 
+    def _as_plain_chunks(self, markdown: str) -> list[Item]:
+        """A part as MarkdownV2 chunks, prepared as the harvested sender prepares its chunks."""
+        chunks = self.truncate_message(self.format_message(markdown), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+        if len(chunks) > 1:
+            # truncate_message appends a raw " (1/2)"; MarkdownV2 reserves the parentheses.
+            chunks = [_separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", c))
+                      for c in chunks]
+        return [("plain", c, 0) for c in chunks]
+
     async def _send_items(
             self, chat_id: str, items: "deque[Item]", delivered: list[str], reply_to: Optional[str],
-            metadata: Optional[dict[str, Any]]
+            metadata: Optional[dict[str, Any]], *, thread_fallback: bool = False
     ) -> SendResult:
-        """Send ``items`` in order. A part Telegram refuses is cut smaller and, failing that, sent as
-        MarkdownV2 chunks; a failure after something landed is a partial delivery the caller can resume."""
+        """Send ``items`` in order. A rich part Telegram refuses is cut smaller and, failing that, sent as
+        MarkdownV2 chunks; once rich messages are latched off, the rest go as MarkdownV2. A failure after
+        something landed is a partial delivery, resumable only when the failed item certainly did not go."""
         thread_id = self._metadata_thread_id(metadata)
         dm_topic = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
         error_types = self._telegram_error_types()
         while items:
             kind, text, splits = items[0]
+            if kind == "rich" and getattr(self, "_rich_send_disabled", False):
+                items.popleft()
+                items.extendleft(reversed(self._as_plain_chunks(text)))
+                continue
             index = len(delivered)
             await self._pace(chat_id)
             if kind == "plain":
                 try:
                     outcome = await self._send_chunk_with_retries(
-                        chat_id, text, index, reply_to, metadata, thread_id, False, error_types)
+                        chat_id, text, index, reply_to, metadata, thread_id, thread_fallback, error_types)
                 except Exception as exc:
                     classified = self._classify_send_exception(exc, error_types)
-                    return self._partial(classified, items, delivered, tail_certain=classified.retryable)
+                    return self._partial(classified, items, delivered, tail_certain=classified.retryable,
+                                         thread_fallback=thread_fallback)
                 if isinstance(outcome, SendResult):  # a definite non-delivery
-                    return self._partial(outcome, items, delivered)
-                delivered.append(str(outcome[0].message_id))
+                    return self._partial(outcome, items, delivered, thread_fallback=thread_fallback)
+                msg, thread_fallback = outcome
+                delivered.append(str(msg.message_id))
                 items.popleft()
                 continue
             anchor = reply_to if (dm_topic or self._should_thread_reply(reply_to, index)) else None
             result = await self._try_send_rich(chat_id, text, anchor, metadata)
             if result is None:
-                # Telegram refused this part for good (limits it counts differently, a parse error): it
-                # was not delivered, so sending it again in another form cannot duplicate it.
+                # Refused for good (limits counted otherwise, a parse error) or the endpoint is gone: not
+                # delivered, so sending it again in another form cannot duplicate it.
                 items.popleft()
-                smaller = (rich.split_markdown(text, char_budget=max(1000, len(text) // 2),
-                                               block_budget=max(10, rich.estimate_blocks(text) // 2))
-                           if splits < _MAX_RESPLITS else [text])
+                smaller: list[str] = [text]
+                if splits < _MAX_RESPLITS and len(text) >= _MIN_PART_CHARS and not getattr(
+                        self, "_rich_send_disabled", False):
+                    smaller = rich.split_markdown(text, char_budget=max(_MIN_PART_CHARS // 2, len(text) // 2),
+                                                  block_budget=max(10, rich.estimate_blocks(text) // 2))
                 if len(smaller) > 1:
                     items.extendleft(reversed([("rich", s, splits + 1) for s in smaller]))
                 else:
-                    chunks = self.truncate_message(self.format_message(text), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
-                    items.extendleft(reversed([("plain", c, 0) for c in chunks]))
+                    items.extendleft(reversed(self._as_plain_chunks(text)))
                 continue
             if not result.success:
-                return self._partial(result, items, delivered, tail_certain=result.retryable)
+                if result.retry_after is not None:
+                    self._record_send_flood_cooldown(chat_id, result.retry_after)
+                raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+                return self._partial(result, items, delivered, tail_certain=bool(raw.get("certainly_unsent")),
+                                     thread_fallback=thread_fallback)
             delivered.append(result.message_id or "")
             items.popleft()
         await self._retrigger_typing(chat_id, metadata)
         return SendResult(success=True, message_id=delivered[0] if delivered else None, raw_response={
             "message_ids": list(delivered), "requested_thread_id": self._message_thread_id_for_send(thread_id),
-            "thread_fallback": False})
+            "thread_fallback": thread_fallback})
 
     @staticmethod
-    def _partial(result: SendResult, items: "deque[Item]", delivered: list[str], *,
-                 tail_certain: bool = True) -> SendResult:
+    def _partial(result: SendResult, items: "deque[Item]", delivered: list[str], *, tail_certain: bool = True,
+                 thread_fallback: bool = False) -> SendResult:
         """The harvested ``partial_overflow`` contract, with the unsent items for ``_resume_partial_send``.
 
-        Nothing delivered: the result is returned as it is, and a retry sends the whole answer again."""
+        Nothing delivered: the result is returned as it is, and a retry sends the whole answer again. A tail
+        that is not certainly undelivered is not attached, so nothing is resent (Hermes'
+        ``_resume_partial_send`` contract: resume only where non-delivery is certain)."""
         if not delivered:
             return result
         raw = dict(result.raw_response) if isinstance(result.raw_response, dict) else {}
         raw.update({
             "partial_overflow": True, "delivered_chunks": len(delivered),
             "total_chunks": len(delivered) + len(items), "last_message_id": delivered[-1],
-            "continuation_message_ids": tuple(delivered[1:])})
+            "continuation_message_ids": tuple(delivered[1:]), "thread_fallback": thread_fallback})
         if tail_certain and items:
             raw["undelivered_rich_items"] = tuple(items)
             raw["delivered_message_ids"] = tuple(delivered)
@@ -182,4 +218,5 @@ class RichAnswersMixin:
             cooldown = self._send_flood_cooldown_remaining(chat_id)
             if cooldown is not None:
                 return self._partial(_flood_cap_result(cooldown), deque(items), delivered)
-            return await self._send_items(chat_id, deque(items), delivered, reply_to, metadata)
+            return await self._send_items(chat_id, deque(items), delivered, reply_to, metadata,
+                                          thread_fallback=bool(raw.get("thread_fallback")))
