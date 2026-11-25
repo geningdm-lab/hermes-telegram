@@ -173,3 +173,5 @@ The cutter:
 Position: that resend is Hermes' recovery policy, and it is visible, not silent. The ledger's contract is "never silently resend an ambiguous send" (`gateway/delivery_ledger.py:1-10`): a failed or interrupted final is resent with a marker that says it may be a duplicate (`RECONNECTED_MARKER`, `FLOOD_MARKER`, `delivery_ledger.py:41-50`), and only after a backoff, with the last attempt kept for restart recovery (`retry_not_before`, `delivery_ledger.py:151-168`). This plugin removed the silent duplicate: the immediate, unmarked base retry (`_send_retry_is_final`). Suppressing the ledger's marked resend as well would trade a labelled possible duplicate for a possibly lost answer, which the ledger exists to prevent, and it would need the plugin to rewrite another module's delivery state.
 
 Reopen if the owner prefers losing an answer whose delivery is unknown over a marked resend, or if the ledger starts resending without a marker.
+
+Owner decision, 2026-11-25: keep the marked resend (docs/design.md, Decisions and open questions, 6).
