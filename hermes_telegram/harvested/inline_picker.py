@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Tuple
 
-logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
+logger = logging.getLogger("plugins.platforms.telegram.inline_picker")
 
 # Telegram hard limit: max 50 results per answerInlineQuery call.
 PAGE_SIZE = 50

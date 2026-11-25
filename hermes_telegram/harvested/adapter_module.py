@@ -31,7 +31,7 @@ from datetime import datetime, timezone, UTC
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 from hermes_cli import setup_platforms
 
-logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
+logger = logging.getLogger(__name__.rpartition(".harvested.")[0] + ".adapter")
 
 from agent.deadline import run_bounded_async
 from agent.ssl_verify import platform_ssl_context

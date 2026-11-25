@@ -28,7 +28,7 @@ from gateway.platforms._shared import coerce_port
 from gateway.platforms.helpers import bounded_put
 from utils import atomic_json_write
 
-logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
+logger = logging.getLogger("plugins.platforms.telegram.update_admission")
 
 _DEFAULT_BLOCK = object()
 DEFAULT_MAX_CONCURRENT_UPDATES = 32

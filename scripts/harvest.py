@@ -188,29 +188,76 @@ DROPPED_TOP_LEVEL = {"TelegramAdapter", "_build_adapter", "register"}
 SYS_PATH_HACK = "sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))"
 # Import statements only: logger names such as "plugins.platforms.telegram.adapter" stay as they are.
 SIBLING_IMPORT = re.compile(r"^(\s*from )plugins\.platforms\.telegram\.(\w+)( import )", re.M)
-# A module logger keeps the name it has upstream: "<plugin package>.adapter" for adapter.py's code, and
-# "<plugin package>.<module>" for a sibling, without the "harvested" level.
+# A module logger keeps the name it has upstream. Hermes loads adapter.py as
+# "hermes_plugins.platforms__telegram.adapter", and adapter.py imports its siblings by their absolute
+# names, so a sibling logs as "plugins.platforms.telegram.<module>".
 MODULE_LOGGER = "logging.getLogger(__name__)"
-UPSTREAM_LOGGER = ('logging.getLogger(__name__.replace(".harvested.", ".", 1)'
-                   '.replace(".adapter_module", ".adapter"))')
+ADAPTER_LOGGER = 'logging.getLogger(__name__.rpartition(".harvested.")[0] + ".adapter")'
 
 
-def rewrite_logger(text: str) -> tuple[str, list[str]]:
-    count = text.count(MODULE_LOGGER)
-    if not count:
+def sibling_logger(module: str) -> str:
+    return f'logging.getLogger("plugins.platforms.telegram.{module}")'
+
+
+def rewrite_logger(text: str, replacement: str) -> tuple[str, list[str]]:
+    if MODULE_LOGGER not in text:
         return text, []
-    return text.replace(MODULE_LOGGER, UPSTREAM_LOGGER), ["module logger keeps its upstream name"]
+    return text.replace(MODULE_LOGGER, replacement), ["module logger keeps its upstream name"]
 
 
 def git_show(repo: Path, path: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), "show", f"{PIN}:{path}"], capture_output=True, text=True,
-                          check=True).stdout
+    out = subprocess.run(["git", "-C", str(repo), "show", f"{PIN}:{path}"], capture_output=True, check=True).stdout
+    return out.decode("utf-8")  # the source's own encoding, whatever the locale
 
 
 def git_ls(repo: Path, path: str) -> list[str]:
     out = subprocess.run(["git", "-C", str(repo), "ls-tree", "--name-only", PIN, f"{path}/"],
-                         capture_output=True, text=True, check=True).stdout
+                         capture_output=True, check=True).stdout.decode("utf-8")
     return [line.rsplit("/", 1)[-1] for line in out.splitlines()]
+
+
+# Registration hooks Hermes calls outside the gateway (config loads, status, setup, cron): harvested again
+# into registration.py with only the module-level code they need, so calling them imports neither
+# python-telegram-bot nor the adapter. telegram_deps_present stays out: it reads TELEGRAM_AVAILABLE.
+REGISTRATION_HOOKS = ("_resolve_notifications_mode", "_is_connected", "_standalone_send", "interactive_setup",
+                      "_apply_yaml_config")
+
+
+def _bound_by(node: ast.stmt) -> list[str]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name).split(".")[0] for a in node.names]
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+    if isinstance(node, (ast.Try, ast.If, ast.With)):
+        return [name for sub in ast.walk(node) if sub is not node and isinstance(sub, ast.stmt)
+                for name in _bound_by(sub)]
+    return []
+
+
+def registration_module(text: str) -> str:
+    """The REGISTRATION_HOOKS of adapter.py and the module-level statements they use, in source order."""
+    tree = ast.parse(text)
+    binder: dict[str, ast.stmt] = {}
+    for node in tree.body:
+        for name in _bound_by(node):
+            binder.setdefault(name, node)
+    chosen: dict[int, ast.stmt] = {}
+    todo = list(REGISTRATION_HOOKS)
+    while todo:
+        node = binder.get(todo.pop())
+        if node is None or id(node) in chosen:
+            continue
+        if isinstance(node, ast.Try):
+            raise SystemExit(f"a registration hook depends on the SDK import block at line {node.lineno}")
+        chosen[id(node)] = node
+        todo.extend(sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name) and sub.id in binder)
+    lines = text.splitlines(keepends=True)
+    body = "\n".join("".join(lines[n.lineno - 1:n.end_lineno]).rstrip("\n") + "\n"
+                     for n in sorted(chosen.values(), key=lambda n: n.lineno))
+    return body
 
 
 def header(src_name: str, rewrites: list[str], extra: str = "") -> str:
@@ -331,11 +378,18 @@ def split_adapter(text: str) -> dict[str, str]:
         raise SystemExit("the sys.path insertion changed upstream; review it")
     module_text = module_text.replace(SYS_PATH_HACK, "pass  # repository-root sys.path insertion dropped by harvest")
     module_text, rewrites = rewrite_sibling_imports(module_text)
-    module_text, logger_rewrites = rewrite_logger(module_text)
+    module_text, logger_rewrites = rewrite_logger(module_text, ADAPTER_LOGGER)
     module_names = module_bound_names(ast.parse(module_text))
     rebound = rebound_sdk_names(tree)
+    hooks_text, hook_rewrites = rewrite_sibling_imports(registration_module(text))
+    hooks_text, hook_logger = rewrite_logger(hooks_text, ADAPTER_LOGGER)
 
     out = {
+        "registration.py": header(
+            "adapter.py", hook_rewrites + hook_logger + [
+                f"only {', '.join(REGISTRATION_HOOKS)} and the module-level statements they use, in source order",
+            ], "Registration hooks Hermes calls outside the gateway; no python-telegram-bot import.",
+        ) + hooks_text,
         "adapter_module.py": header(
             "adapter.py", rewrites + logger_rewrites + [
                 "repository-root sys.path insertion dropped (the plugin imports Hermes as installed)",
@@ -383,7 +437,7 @@ def main() -> None:
     files: dict[str, str] = {}
     for name in SIBLINGS:
         text, rewrites = rewrite_sibling_imports(git_show(repo, f"{SRC_DIR}/{name}.py"))
-        text, logger_rewrites = rewrite_logger(text)
+        text, logger_rewrites = rewrite_logger(text, sibling_logger(name))
         files[f"{name}.py"] = header(f"{name}.py", rewrites + logger_rewrites) + text
     present = {n[:-3] for n in git_ls(repo, SRC_DIR) if n.endswith(".py")} - {"__init__", "adapter"}
     if present != set(SIBLINGS):

@@ -20,7 +20,7 @@ from gateway.platforms.base import coerce_plaintext_gateway_command
 from gateway.platforms.event import MessageEvent
 from gateway.session_identity import replace_source
 
-logger = logging.getLogger(__name__.replace(".harvested.", ".", 1).replace(".adapter_module", ".adapter"))
+logger = logging.getLogger("plugins.platforms.telegram.telegram_topic_transfer")
 
 # ``(thread_id, created)``: ``created`` = a fresh topic; otherwise the lobby-recovery fallback topic.
 TopicTransferFn = Callable[[Any], Awaitable[Optional[tuple[str, bool]]]]

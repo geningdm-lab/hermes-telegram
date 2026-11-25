@@ -2,20 +2,20 @@
 
 ``build_adapter`` and ``register`` follow ``_build_adapter`` and ``register`` of hermes-agent@c419cf7
 ``plugins/platforms/telegram/adapter.py`` (MIT, Nous Research), which the harvest drops because they name
-the upstream class. Every other registration argument is the bundled one; checks/test_registration.py
-holds this to the bundled registration.
+the upstream class. checks/test_registration.py holds every argument to the bundled registration except
+those in its ``OWN`` table.
 
 Hermes defers only bundled platform plugins: an enabled user plugin registers in every process that
-discovers plugins, the CLI included (hermes_cli/plugins_discovery.py:312). So this module imports nothing
-that loads python-telegram-bot or the adapter. The hooks that live in the harvested adapter module are
-registered as thin wrappers that import it on first call, which is when the bundled plugin's deferred
-loader would import it too.
+discovers plugins, the CLI included (hermes_cli/plugins_discovery.py:312), and its hooks run on every
+config load (gateway/config_env.py:206). So nothing here imports python-telegram-bot or the adapter
+until a gateway builds one. The hooks Hermes calls outside the gateway are the bundled functions,
+harvested into ``harvested/registration.py`` with only the light imports they need.
 """
 
 import importlib
+import importlib.util
 import logging
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,13 @@ from agent.i18n import t
 from .harvested import gateway_env
 from .hint import PLATFORM_HINT
 from .harvested.dashboard_card import DASHBOARD_CARD
+from .harvested.registration import (
+    _apply_yaml_config,
+    _is_connected,
+    _resolve_notifications_mode,
+    _standalone_send,
+    interactive_setup,
+)
 from .harvested.telegram_ids import parse_send_target
 
 VERSION = "0.1.0"
@@ -36,20 +43,17 @@ def _adapter_module() -> Any:
     return importlib.import_module(_ADAPTER_MODULE)
 
 
-def _harvested_hook(name: str, *, is_async: bool = False) -> Callable[..., Any]:
-    """A wrapper for the harvested adapter module's ``name`` that imports the module on first call.
+def telegram_deps_present() -> bool:
+    """PASSIVE ``check_fn``: is python-telegram-bot importable? Never installs, never imports the SDK.
 
-    ``__harvested__`` names the target, so checks/test_registration.py compares it with upstream's hook.
+    The bundled probe returns the adapter module's ``TELEGRAM_AVAILABLE``, which costs importing the adapter
+    and the SDK; for a deferred bundled plugin that import has already happened when the probe runs. Here
+    the adapter module's answer is used once it is loaded; before that, whether the package can be found.
     """
-    if is_async:
-        async def hook(*args: Any, **kwargs: Any) -> Any:
-            return await getattr(_adapter_module(), name)(*args, **kwargs)
-    else:
-        def hook(*args: Any, **kwargs: Any) -> Any:
-            return getattr(_adapter_module(), name)(*args, **kwargs)
-    hook.__name__ = hook.__qualname__ = name
-    hook.__harvested__ = name  # type: ignore[attr-defined]
-    return hook
+    module = sys.modules.get(_ADAPTER_MODULE)
+    if module is not None:
+        return bool(module.TELEGRAM_AVAILABLE)
+    return importlib.util.find_spec("telegram") is not None
 
 
 def propagate_sdk_names() -> None:
@@ -88,11 +92,11 @@ def build_adapter(config: Any) -> Any:
     propagate_sdk_names()
     adapter = HermesTelegramAdapter(config)
     try:
-        adapter._notifications_mode = _adapter_module()._resolve_notifications_mode()
+        adapter._notifications_mode = _resolve_notifications_mode()
     except Exception:  # Same fallback as upstream: an unreadable mode must not stop the platform.
         logger.debug("Telegram notifications mode unreadable; using 'important'", exc_info=True)
         adapter._notifications_mode = "important"
-    # The line that says which adapter serves Telegram: docs/install.md tells operators to look for it.
+    # Which adapter serves Telegram; docs/install.md tells operators to look for this line.
     logger.info("hermes-telegram %s: Telegram adapter %s from %s", VERSION, type(adapter).__name__,
                 Path(__file__).resolve().parent)
     return adapter
@@ -101,14 +105,12 @@ def build_adapter(config: Any) -> Any:
 def registration_kwargs() -> dict[str, Any]:
     """The arguments this plugin passes to ``ctx.register_platform``."""
     return dict(
-        name="telegram", label="Telegram", adapter_factory=build_adapter,
-        check_fn=_harvested_hook("telegram_deps_present"),
+        name="telegram", label="Telegram", adapter_factory=build_adapter, check_fn=telegram_deps_present,
         **DASHBOARD_CARD,
-        ensure_deps_fn=ensure_telegram_requirements, is_connected=_harvested_hook("_is_connected"),
+        ensure_deps_fn=ensure_telegram_requirements, is_connected=_is_connected,
         required_env=["TELEGRAM_BOT_TOKEN"], install_hint=t("platform.telegram.install_hint"),
-        setup_fn=_harvested_hook("interactive_setup"), apply_yaml_config_fn=_harvested_hook("_apply_yaml_config"),
-        cron_deliver_env_var="TELEGRAM_HOME_CHANNEL",
-        standalone_sender_fn=_harvested_hook("_standalone_send", is_async=True),
+        setup_fn=interactive_setup, apply_yaml_config_fn=_apply_yaml_config,
+        cron_deliver_env_var="TELEGRAM_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
         max_message_length=4096, emoji="✈️", allow_update_command=True,
         platform_hint=PLATFORM_HINT,
         display_tier="high",
