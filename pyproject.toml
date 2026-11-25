@@ -9,6 +9,10 @@ license = "MIT"
 dependencies = []
 
 [dependency-groups]
+acceptance = [
+    # The acceptance driver logs in as the owner's Telegram account (acceptance/README.md).
+    "telethon==1.46.0",
+]
 dev = [
   # The Hermes commit homelab deploys, with its Telegram extra (python-telegram-bot 22.8).
   "hermes-agent[telegram] @ git+https://github.com/NousResearch/hermes-agent.git@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee",
