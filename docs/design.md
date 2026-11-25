@@ -154,7 +154,7 @@ How slice 2 does it (`hermes_telegram/files.py`, `hermes_telegram/tools.py`, `he
 - `telegram_send(files, as_files?, caption?)` sends 1 to 20 files now, in the turn's chat and topic, as their kind or, with `as_files`, as documents. It passes the three guards under Tools: no recipient argument, only in a turn a user started in a Telegram chat, at most 10 sends per turn. Each album counts as one send. It returns what was sent and what was not, with the reasons, which the chat also shows.
 - The hint tells the agent to call `telegram_send` to send files now, or a photo, video or recording as a downloadable file, and keeps the bundled `MEDIA:` description for everything else.
 
-Today's failed sends (PRD Q12) are not confirmed: that needs the gateway logs on the host. The likely cause is the silent drop above: a `MEDIA:` path the agent wrote that is not on the gateway's host, or not allowed, is logged at INFO and never mentioned in the chat. Uploads over 50 MB would also fail, as a refusal from Telegram. Slice 2 names both in the chat, so the next failure says which it is.
+Today's failed sends (PRD Q12) are not confirmed: that needs the gateway logs on the host, and the owner deferred it (Decisions and open questions, 4). The likely cause is the silent drop above: a `MEDIA:` path the agent wrote that is not on the gateway's host, or not allowed, is logged at INFO and never mentioned in the chat. Uploads over 50 MB would also fail, as a refusal from Telegram. Slice 2 names both in the chat, so the next failure says which it is.
 
 ### Tools
 
@@ -240,10 +240,13 @@ Decided by the owner on PR #1, 2026-11-25:
 2. The tool set stands, plus stickers ("Норм, я бы еще стикеры добавил бы").
 3. The three guards under Tools (no recipient chosen by the model, only in user-started Telegram turns, a cap per turn) are the accepted reading of Hermes' rule against a general send tool ("Yes, guards are fine").
 
+Deferred by the owner, 2026-11-25:
+
+4. The cause of today's failed file sends (PRD Q12). The gateway logs are not available now ("Прямо сейчас доступ к логам не могу дать. Пока можешь конкретно эту проблему с файлами задеферить"). Slice 2 keeps the likely cause under Files as a hypothesis and makes either cause visible in the chat; confirming it waits for the host's gateway log (`Skipping MEDIA directive path`, or Telegram's refusal).
+
 Open, asked by push on 2026-11-25:
 
-4. Should the `telegram` tools be listed to the model directly (`tools.tool_search.defer` or a direct-surface entry), instead of behind the tool search bridge? Direct listing costs their schemas in every prompt; the bridge costs a lookup before the first call. Slice 2 keeps Hermes' default, the bridge.
-5. Q12: can the owner share the gateway log lines for a failed file send (`Skipping MEDIA directive path`, or Telegram's refusal)? The fix in slice 2 makes those failures visible either way.
+5. Should the `telegram` tools be listed to the model directly (`tools.tool_search.defer` or a direct-surface entry), instead of behind the tool search bridge? Direct listing costs their schemas in every prompt; the bridge costs a lookup before the first call. Slice 2 keeps Hermes' default, the bridge.
 
 ## Out of scope
 
