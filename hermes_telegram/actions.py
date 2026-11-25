@@ -175,18 +175,51 @@ class ActionsMixin:
 
     # --- the bot's own messages, for reactions ----------------------------------------------------------
 
+    def _bot_identity(self) -> str:
+        """This bot's id, the token's prefix: records of another bot in the same chat are not this one's."""
+        return str(getattr(self.config, "token", "") or "").split(":", 1)[0]
+
+    def _route_profile(self, chat_id: Any, thread_id: Any) -> str:
+        """The profile a private chat's text is routed to (``build_source``: in a private chat the user is the
+        chat)."""
+        try:
+            source = self.build_source(chat_id=str(chat_id), chat_type="dm", user_id=str(chat_id),
+                                       thread_id=str(thread_id) if thread_id else None)
+        except Exception:
+            return ""
+        return getattr(source, "profile", None) or ""
+
+    @staticmethod
+    def _delivered_thread(requested: Any, sent: Any) -> Optional[str]:
+        """The topic a send landed in: the one asked for, unless Hermes' delivery fell back to the root chat
+        (a SendResult's ``thread_fallback``, or a returned message without a topic)."""
+        if not requested:
+            return None
+        if hasattr(sent, "success"):
+            raw = sent.raw_response if isinstance(sent.raw_response, dict) else {}
+            return None if raw.get("thread_fallback") else str(requested)
+        messages = sent if isinstance(sent, (list, tuple)) else [sent]
+        if any(hasattr(m, "message_thread_id") and m.message_thread_id is None for m in messages):
+            return None
+        return str(requested)
+
     def _remember_bot_messages(self, chat_id: Any, results: Any, thread_id: Any = None, *, kind: str = "text",
-                               markup: Optional[dict[str, Any]] = None) -> None:
-        """Keep the bot's sent messages with their topic, their kind (``text``, ``media``, ``prompt``,
-        ``widget``) and a tool message's keyboard, which an edit keeps (slice 6)."""
+                               markup: Optional[dict[str, Any]] = None, rich: Optional[bool] = None) -> None:
+        """Keep the bot's sent messages with the bot, the routed profile and the topic they landed in, their
+        kind (``text``, ``media``, ``prompt``, ``widget``), whether a text went rich, and a tool message's
+        keyboard, which an edit keeps (slice 6)."""
         store = self._store("bot_messages", _BOT_MESSAGE_MEMORY)
+        profile = self._route_profile(chat_id, thread_id)
         for result in results if isinstance(results, (list, tuple)) else [results]:
             for mid in _sent_ids(result):
                 if mid is None:
                     continue
-                record: dict[str, Any] = {"thread": str(thread_id) if thread_id else None, "kind": kind}
+                record: dict[str, Any] = {"thread": str(thread_id) if thread_id else None, "kind": kind,
+                                          "bot": self._bot_identity(), "profile": profile}
                 if markup:
                     record["markup"] = markup
+                if rich is not None:
+                    record["rich"] = rich
                 try:
                     store.put(f"{chat_id}:{mid}", record)
                 except StoreError:
@@ -210,7 +243,7 @@ class ActionsMixin:
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> Any:
         result = await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
-        self._remember_bot_messages(chat_id, result, self._metadata_thread_id(metadata))
+        self._remember_bot_messages(chat_id, result, self._delivered_thread(self._metadata_thread_id(metadata), result))
         return result
 
     async def _send_with_dm_topic_reply_anchor_retry(self, send_fn: Any, send_kwargs: dict[str, Any],
@@ -219,8 +252,8 @@ class ActionsMixin:
                                                      reset_media: Optional[Any] = None) -> Any:
         sent = await super()._send_with_dm_topic_reply_anchor_retry(send_fn, send_kwargs, metadata,
                                                                     reply_to_message_id, media_label, reset_media)
-        self._remember_bot_messages(send_kwargs.get("chat_id"), sent, self._metadata_thread_id(metadata),
-                                    kind="media")
+        self._remember_bot_messages(send_kwargs.get("chat_id"), sent,
+                                    self._delivered_thread(self._metadata_thread_id(metadata), sent), kind="media")
         return sent
 
     @staticmethod
@@ -238,7 +271,7 @@ class ActionsMixin:
     async def _send_control_message(self, chat_id: str, text: str, *, thread_id: Optional[str],
                                     **kwargs: Any) -> Any:
         sent = await super()._send_control_message(chat_id, text, thread_id=thread_id, **kwargs)
-        self._remember_bot_messages(chat_id, sent, thread_id, kind="prompt")
+        self._remember_bot_messages(chat_id, sent, self._delivered_thread(thread_id, sent), kind="prompt")
         return sent
 
     # --- polls --------------------------------------------------------------------------------------------

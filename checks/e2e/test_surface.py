@@ -51,11 +51,13 @@ def test_the_agent_replies_with_a_quote_and_an_effect_then_edits_pins_and_delete
     assert not any("Error" in t or "error" in t for t in _tool_results(rig, second)), _tool_results(rig, second)
 
 
-def test_a_quote_that_is_not_in_the_message_comes_back_to_the_agent_as_not_sent(rig):
+def test_a_quote_that_is_not_in_the_message_is_refused_before_anything_is_sent(rig):
+    # Review slice 6: the plugin holds the user's text and entities, so it refuses the quote Telegram would.
     token = "sf-badquote"
     say = tool_call(rig, "sfq", "telegram_send", {"text": "About that", "quote": "words the user never wrote"})
     rig.director.script(token, say, C.answer("A-sf-badquote", "ok"))
     inbound = rig.drv.dm(f"hello there [in:{token}]")
     C.wait_reply(rig, inbound.chat_id, "A-sf-badquote")
     results = _tool_results(rig, token)  # the chat's history is shared: this call's result is the last
-    assert "quote_text_invalid" in results[-1].lower() and '"sent": false' in results[-1], results[-1]
+    assert "exact part of the user's message" in results[-1], results[-1]
+    assert not [c for c in rig.drv.standin.calls_of("sendMessage", "sendRichMessage") if "About that" in str(c.params)]

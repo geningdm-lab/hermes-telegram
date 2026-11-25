@@ -364,11 +364,18 @@ class MediaTelegramStandin(RichTelegramStandin):
 
     def _m_sendMessage(self, p: dict[str, Any]) -> dict[str, Any]:
         self._check_reply(p)
-        return super()._m_sendMessage(p)
+        return self._with_effect(p, super()._m_sendMessage(p))
 
     def _m_sendRichMessage(self, p: dict[str, Any]) -> dict[str, Any]:
         self._check_reply(p)
-        return super()._m_sendRichMessage(p)
+        return self._with_effect(p, super()._m_sendRichMessage(p))
+
+    @staticmethod
+    def _with_effect(p: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
+        """types/message.md: the sent Message carries the effect it was sent with (``effect_id``)."""
+        if p.get("message_effect_id"):
+            msg["effect_id"] = str(p["message_effect_id"])
+        return msg
 
     def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         media = p.get("media")

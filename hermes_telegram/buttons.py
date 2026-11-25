@@ -212,13 +212,14 @@ class ButtonsMixin:
 
     async def send_single(self, chat_id: str, text: str, markup: Optional[dict[str, Any]],
                           metadata: Optional[dict[str, Any]], *, reply_to: Optional[str] = None,
-                          quote: Optional[str] = None, link_preview: Optional[dict[str, Any]] = None,
+                          quote: Optional[dict[str, Any]] = None, link_preview: Optional[dict[str, Any]] = None,
                           effect: Optional[str] = None) -> Any:
         """A tool's message as one message, never several (``_single_body``); with its buttons, the profile's
         notification policy, and no fallback out of the turn's topic. ``reply_to`` replaces the turn's reply
-        anchor, with ``quote`` an exact part of that message. ``link_preview`` (LinkPreviewOptions, else the
-        profile's ``disable_link_previews``) applies to a MarkdownV2 message: a rich one does not take it.
-        ``effect`` is a message effect id, for private chats."""
+        anchor; ``quote`` holds the ReplyParameters quote fields (``messages.quote_parts``). ``link_preview``
+        (LinkPreviewOptions, else the profile's ``disable_link_previews``) applies to a MarkdownV2 message: a
+        rich one does not take it. ``effect`` is a message effect id, for private chats; a message Telegram
+        returns without it is marked ``effect_missing``."""
         from gateway.platforms.base import SendResult
 
         from .harvested.adapter_module import _redact_telegram_error_text, normalize_telegram_chat_id
@@ -245,7 +246,7 @@ class ButtonsMixin:
         if reply_to is not None:
             reply_to_id = int(reply_to)
         if reply_to_id is not None:
-            base["reply_parameters"] = {"message_id": reply_to_id, **({"quote": quote} if quote else {})}
+            base["reply_parameters"] = {"message_id": reply_to_id, **(quote or {})}
         if effect:
             base["message_effect_id"] = effect
         preview = preview_options(link_preview, getattr(self, "_disable_link_previews", False))
@@ -254,19 +255,20 @@ class ButtonsMixin:
             if as_rich:
                 sent = await self._bot.do_api_request("sendRichMessage",
                                                        api_kwargs={**base, "rich_message": {"markdown": body}})
-                message_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
             else:
                 if preview:
                     base["link_preview_options"] = preview
-                msg = await self._bot.send_message(chat_id=base.pop("chat_id"), text=body, parse_mode="MarkdownV2",
-                                                   api_kwargs=base)
-                message_id = msg.message_id
+                sent = await self._bot.send_message(chat_id=base.pop("chat_id"), text=body, parse_mode="MarkdownV2",
+                                                    api_kwargs=base)
         except Exception as exc:
             return self._send_failed(exc, _redact_telegram_error_text(exc))
-        result = SendResult(success=True, message_id=str(message_id))
-        if as_rich and link_preview:
-            result.raw_response = {"preview_ignored": True}
-        self._remember_bot_messages(chat_id, [result], thread_id, markup=markup)
+        field = sent.get if isinstance(sent, dict) else (lambda key: getattr(sent, key, None))
+        result = SendResult(success=True, message_id=str(field("message_id")))
+        result.raw_response = {"preview_ignored": bool(as_rich and link_preview),
+                               "effect_missing": bool(effect and str(field("effect_id") or "") != str(effect))}
+        if as_rich:
+            await self._record_rich_sent(chat_id, result.message_id, text)  # Hermes' reply context for it
+        self._remember_bot_messages(chat_id, [result], thread_id, markup=markup, rich=as_rich)
         self._reshow_soon(chat_id, thread_id)
         return result
 

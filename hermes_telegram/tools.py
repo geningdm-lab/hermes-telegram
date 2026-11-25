@@ -212,6 +212,24 @@ def _parse_extras(args: dict[str, Any]) -> dict[str, Any]:
     return extras
 
 
+def _quote(admitted: AdmittedTurn, turn: Turn, extras: dict[str, Any]) -> dict[str, Any]:
+    """``reply_to`` and the ReplyParameters quote fields for a quote of the user's current message, the only
+    message whose text and formatting the plugin holds; refused before anything is reserved."""
+    from .messages import quote_parts
+
+    current = str(turn.inbound_message_id)
+    if extras.get("reply_to", current) != current:
+        raise TurnRefused("A quote can be of the user's current message only: reply to your own message "
+                          "without quote.")
+    if not current.isdigit() or admitted.text is None:
+        raise TurnRefused("This turn has no message text of the user's to quote (it started with a tap, a vote, "
+                          "a reaction or a widget request): reply without quote.")
+    parts = quote_parts(admitted.text, admitted.entities, extras["quote"])
+    if parts is None:
+        raise TurnRefused("quote must be an exact part of the user's message.")
+    return {"reply_to": current, "quote": parts}
+
+
 def _own_target(adapter: Any, turn: Turn, message_id: str, *, bots_only: bool = False) -> Optional[dict[str, Any]]:
     """The bot's record of ``message_id`` when it is the bot's, in this conversation; ``None`` for the user's
     current message (unless ``bots_only``); else ``TurnRefused``. Telegram's methods take only the chat and the
@@ -219,7 +237,8 @@ def _own_target(adapter: Any, turn: Turn, message_id: str, *, bots_only: bool = 
     if not bots_only and message_id == str(turn.inbound_message_id):
         return None
     mine = adapter._bot_message(turn.chat_id, message_id)
-    if mine is None or (mine.get("thread") or None) != (turn.thread_id or None):
+    if (mine is None or (mine.get("thread") or None) != (turn.thread_id or None)
+            or mine.get("bot") != adapter._bot_identity() or (mine.get("profile") or "") != (turn.profile or "")):
         raise TurnRefused("message_id must be " + ("one of your messages" if bots_only
                           else "the user's current message or one of your messages") + " in this conversation.")
     return mine
@@ -256,8 +275,8 @@ async def _deliver(adapter: Any, turn: Turn, resolved: list[tuple[str, str | Non
 
     admitted: AdmittedTurn = adapter.admitted_turn(turn)
     extras = dict(extras or {})
-    if "quote" in extras and "reply_to" not in extras:
-        extras["reply_to"] = str(turn.inbound_message_id)  # a quote of the user's current message
+    if "quote" in extras:
+        extras.update(_quote(admitted, turn, extras))
     if "reply_to" in extras:
         _own_target(adapter, turn, extras["reply_to"])
     deliverable = [(i, path, real) for i, (path, real, _) in enumerate(resolved) if real]
@@ -313,8 +332,11 @@ async def _send_text(adapter: Any, turn: Turn, admitted: AdmittedTurn, text: str
         admitted.give_back(1)
         return {"sent": False, "reason": reason}
     out: dict[str, Any] = {"sent": True, "message_id": sent.message_id}
-    if isinstance(sent.raw_response, dict) and sent.raw_response.get("preview_ignored"):
-        out["note"] = "The text went as a rich message, which takes no link preview options."
+    raw = sent.raw_response if isinstance(sent.raw_response, dict) else {}
+    notes = (["The text went as a rich message, which takes no link preview options."] if raw.get("preview_ignored")
+             else []) + (["Telegram delivered the text without the effect."] if raw.get("effect_missing") else [])
+    if notes:
+        out["note"] = " ".join(notes)
     if set_id is not None:
         try:
             adapter._button_store().bind(set_id, sent.message_id, turn.thread_id)
@@ -526,31 +548,41 @@ async def _change_message(adapter: Any, turn: Turn, args: dict[str, Any]) -> dic
 async def _edit(adapter: Any, turn: Turn, message_id: str, mine: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     from .buttons import StoreError
 
-    if mine.get("kind", "text") != "text":
-        raise TurnRefused("Only a text message can be edited: a file, poll, sticker or widget cannot "
-                          "(for a widget, set its state with op=widget_state).")
+    if mine.get("kind") != "text":  # a record without a kind (before slice 6) may be a prompt
+        raise TurnRefused("Only a text message you sent can be edited: not a file, poll, sticker, widget or "
+                          "prompt (for a widget, set its state with op=widget_state).")
     text, buttons, single_use = _parse_message({k: args[k] for k in ("text", "buttons", "single_use") if k in args})
     if not text:
         raise TurnRefused("edit needs the new text.")
     markup, set_id = None, None
-    if buttons:
+    if "buttons" in args and not buttons:
+        markup = {"inline_keyboard": []}  # buttons=[]: the keyboard goes
+    elif buttons:
         try:
             markup, set_id = adapter.button_markup(turn.chat_id, buttons, single_use=single_use, profile=turn.profile)
         except StoreError:
             raise TurnRefused("The new buttons could not be recorded, so the message was not edited.") from None
     result = await adapter.edit_text(turn.chat_id, message_id, text, markup)
-    if not result.success:
+    uncertain = not result.success and _ambiguous(result)
+    if not result.success and not uncertain:
         raise TurnRefused(f"The message was not edited: {result.error}")
+    out: dict[str, Any] = {"edited": True, "message_id": message_id}
+    if isinstance(result.raw_response, dict) and result.raw_response.get("note"):
+        out["note"] = result.raw_response["note"]
     if markup is not None:
         try:
             store = adapter._button_store()
-            store.retire(turn.chat_id, message_id)  # the old keyboard is gone
+            store.retire(turn.chat_id, message_id)  # the old keyboard is gone, or may be
             if set_id is not None:
                 store.bind(set_id, message_id, turn.thread_id)
+            if uncertain:
+                adapter._keep_keyboard(turn.chat_id, message_id, mine, markup)
         except StoreError:
-            return {"edited": True, "message_id": message_id,
-                    "note": "Its new choices could not be recorded: taps on them will not reach you."}
-    return {"edited": True, "message_id": message_id}
+            out["note"] = "Its new choices could not be recorded: taps on them will not reach you."
+    if uncertain:
+        raise TurnRefused(f"The edit may not have been applied ({result.error}): Telegram did not confirm it. "
+                          "If you edit it again, give the buttons it should show.")
+    return out
 
 
 async def _set_widget_state(adapter: Any, turn: Turn, message_id: str, args: dict[str, Any]) -> dict[str, Any]:
