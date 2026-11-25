@@ -11,11 +11,14 @@ import functools
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 import plugins.platforms.telegram.adapter as upstream_adapter
 from hermes_telegram import register
@@ -27,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OWN = {
     "adapter_factory": "builds HermesTelegramAdapter (checked below)",
     "ensure_deps_fn": "also copies rebound SDK names into the harvested modules (checked below)",
+    "check_fn": "answers without importing the SDK until the adapter module is loaded (checked below)",
 }
 
 
@@ -50,8 +54,6 @@ def _code(fn: Any) -> str:
 
 def _same(ours: Any, theirs: Any) -> bool:
     """Equal values; functions compare by name and code, since harvested copies are new objects."""
-    if callable(ours) and hasattr(ours, "__harvested__"):
-        ours = getattr(adapter_module, ours.__harvested__)  # a lazy hook stands for this harvested function
     if inspect.isfunction(ours) and inspect.isfunction(theirs):
         return ours.__qualname__ == theirs.__qualname__ and _code(ours) == _code(theirs)
     if isinstance(ours, functools.partial) and isinstance(theirs, functools.partial):
@@ -73,6 +75,28 @@ def test_registration_matches_bundled_except_this_plugins_own_arguments():
     assert ours.keys() == theirs.keys()
     differing = sorted(k for k in ours if k not in OWN and not _same(ours[k], theirs[k]))
     assert differing == []
+
+
+def _parameters(fn: Any) -> list[tuple[str, Any, Any]]:
+    """What a caller can pass: names, kinds and defaults; annotations are not compared."""
+    return [(p.name, p.kind, p.default) for p in inspect.signature(fn).parameters.values()]
+
+
+def test_registered_callables_have_the_bundled_signatures():
+    # Hermes inspects some hooks (sync or async, which keyword arguments they take): compare what is
+    # registered, not the function it might stand for.
+    ours, theirs = _registered(register), _registered(upstream_adapter.register)
+    for key, value in ours.items():
+        if callable(value) and not isinstance(value, type):
+            assert inspect.iscoroutinefunction(value) == inspect.iscoroutinefunction(theirs[key]), key
+            assert _parameters(value) == _parameters(theirs[key]), key
+
+
+def test_check_fn_answers_as_the_bundled_probe():
+    # PTB is installed here, so the bundled probe says True; with the adapter module loaded, it is its flag.
+    check = _registered(register)["check_fn"]
+    assert check() is True and upstream_adapter.telegram_deps_present() is True
+    assert adapter_module.TELEGRAM_AVAILABLE is True
 
 
 def test_adapter_factory_builds_this_plugins_adapter_with_the_notification_mode(monkeypatch):
@@ -99,20 +123,29 @@ def test_lazy_install_reaches_the_mixins_that_use_the_sdk(monkeypatch):
     assert adapter_transport.Update is telegram.Update
 
 
-def test_registration_imports_neither_the_sdk_nor_the_adapter(tmp_path: Path):
-    # An enabled user plugin registers in every process that discovers plugins, the CLI included.
+@pytest.mark.parametrize("token", ["", "1:x"], ids=["telegram-unconfigured", "telegram-configured"])
+def test_plugin_discovery_and_config_load_import_neither_the_sdk_nor_the_adapter(tmp_path: Path, token: str):
+    # An enabled user plugin registers in every process that discovers plugins, the CLI included, and
+    # Hermes runs its hooks on every config load (gateway/config_env.py:206). The bundled plugin is
+    # deferred, so neither imports python-telegram-bot until a gateway needs it.
     probe = textwrap.dedent("""
         import json, sys
-        import hermes_telegram
-        class Ctx:
-            def register_platform(self, **kwargs): pass
-        hermes_telegram.register(Ctx())
-        heavy = ("telegram", "hermes_telegram.adapter")
-        print(json.dumps(sorted(m for m in sys.modules if m in heavy or (
-            m.startswith("hermes_telegram.harvested.adapter_") and m != "hermes_telegram.harvested.adapter_hint"))))
+        from hermes_cli.plugins import discover_plugins
+        from gateway.config import load_gateway_config
+        discover_plugins(force=True)
+        load_gateway_config()
+        heavy = ("telegram", "hermes_plugins.platforms__telegram.adapter")
+        print(json.dumps(sorted(m for m in sys.modules if m in heavy or ".harvested.adapter_" in m
+                                and not m.endswith("adapter_hint"))))
     """)
-    env = {**{k: v for k, v in os.environ.items()}, "HOME": str(tmp_path), "HERMES_HOME": str(tmp_path / "h"),
-           "PYTHONPATH": str(ROOT)}
-    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path, capture_output=True, text=True,
+    home = tmp_path / "home"
+    target = home / ".hermes" / "plugins" / "platforms" / "telegram"
+    shutil.copytree(ROOT / "hermes_telegram", target, ignore=shutil.ignore_patterns("__pycache__"))
+    (home / ".hermes" / "config.yaml").write_text("plugins:\n  enabled:\n    - platforms/telegram\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TELEGRAM_"))}
+    env.update(HOME=str(home), HERMES_HOME=str(home / ".hermes"))
+    if token:
+        env["TELEGRAM_BOT_TOKEN"] = token
+    out = subprocess.run([sys.executable, "-I", "-c", probe], env=env, cwd=home, capture_output=True, text=True,
                          timeout=120, check=True)
     assert json.loads(out.stdout.strip().splitlines()[-1]) == []
