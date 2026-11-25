@@ -46,6 +46,9 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "send_multiple_images": "FilesMixin",
     "send_video": "FilesMixin",
     "send_voice": "FilesMixin",
+    "_send_media": "FilesMixin",
+    "on_processing_start": "HumanTurnsMixin",
+    "on_processing_complete": "HumanTurnsMixin",
 }
 
 
