@@ -47,7 +47,7 @@ Verified in the source of the pinned Hermes, `NousResearch/hermes-agent@c419cf7`
 - Inline keyboards exist only for Hermes' own prompts: approvals, slash confirmations, clarify, model and choice pickers (`adapter.py:4250-4626`). The agent cannot send buttons, polls, widgets or reactions, edit or pin a message, or set an effect.
 - The deployment multiplexes profiles on one bot: `gateway.multiplex_profiles = true` with a `profile_routes` entry that sends one Telegram user to the `family` profile, and Telegram keys `dm_policy`, `allow_from`, `group_policy`, `allow_admin_from`, `user_allowed_commands` (`homelab/nix/hermes/family-contact/default.nix:70,204-214`). The deployed Hermes is a patched build (`family-contact/policy/core-tool-boundary.patch`).
 
-Not verified: why file sends fail today (PRD Q12: "было много фейлов при отправке. Надо копать чаты"). That needs the gateway logs on the host.
+Not verified: why file sends fail today (PRD Q12: "было много фейлов при отправке. Надо копать чаты"). That needs the gateway logs on the host; the likely cause is under Files.
 
 ## What Telegram offers
 
@@ -139,9 +139,28 @@ How slice 1 does it (`hermes_telegram/rich.py`, `hermes_telegram/answers.py`):
 - Streamed answers still take the harvested path when the gateway edits a preview into the final answer, or seals heads of a long answer while it streams. Slice 3 owns those (docs/review-log.md, slice 1).
 - The bundled guards for Telegram Desktop stay. Text with CJK characters, and maths inside `<details>`, still take the MarkdownV2 path (tdesktop#30808, Hermes #47653). This plugin does not prove those client bugs; it keeps the bundled behaviour.
 
+### Files
+
+What the user sees (rows 3, 4, 5, 15):
+
+- A document, photo, video, audio file or voice message arrives as its kind. Several photos arrive as one album, more than 10 as consecutive albums of up to 10, in order.
+- A file sent "as a file" arrives as a document, with its name and bytes unchanged, even when it is a photo, a video or a GIF.
+- A file that cannot be delivered is named in the chat with the reason: over Telegram's upload limit for bots (with its size against the limit), refused by Telegram (with Telegram's words), missing on the Hermes host, or not allowed by Hermes' delivery policy. Never silence.
+
+How slice 2 does it (`hermes_telegram/files.py`, `hermes_telegram/tools.py`, `hermes_telegram/turn.py`):
+
+- The harvested senders already deliver each kind natively and send albums of up to 10. `FilesMixin` overrides them only to add what the rows need: `disable_content_type_detection` on documents, a size check against the upload limit for bots before uploading (50 MB, or 2000 MB with a local Bot API server, `local_mode`; a photo over 10 MB is compressed or sent as a document by the harvested sender), and a notice naming the file and the reason when it is not delivered. The notice is sent with `send`, not Hermes' `emit_warning`, because a profile can turn warnings off (`warning_notifications_enabled`).
+- `MEDIA:` lines keep working. A path Hermes would drop, because it is not on this host or because its delivery policy denies it, is only logged by Hermes (`_validated_delivery_path`: "Skipping MEDIA directive path"); the chat saw nothing. `extract_media` swaps such a path for a small notice file that Hermes does deliver, and `send_document` posts the notice instead of uploading it. This applies only where Hermes runs the agent's commands on its own host (`TERMINAL_ENV` local, no Docker), because only there is a path the agent names a path on this host.
+- `telegram_send(files, as_files?, caption?)` sends 1 to 20 files now, in the turn's chat and topic, as their kind or, with `as_files`, as documents. It passes the three guards under Tools: no recipient argument, only in a turn a user started in a Telegram chat, at most 10 sends per turn. Each album counts as one send. It returns what was sent and what was not, with the reasons, which the chat also shows.
+- The hint tells the agent to call `telegram_send` to send files now, or a photo, video or recording as a downloadable file, and keeps the bundled `MEDIA:` description for everything else.
+
+Today's failed sends (PRD Q12) are not confirmed: that needs the gateway logs on the host. The likely cause is the silent drop above: a `MEDIA:` path the agent wrote that is not on the gateway's host, or not allowed, is logged at INFO and never mentioned in the chat. Uploads over 50 MB would also fail, as a refusal from Telegram. Slice 2 names both in the chat, so the next failure says which it is.
+
 ### Tools
 
-Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. A profile gets them only if its toolsets include `telegram`; the `family` profile lists its toolsets explicitly, so it gets none until the owner adds it.
+Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. A profile gets them only if it enables this plugin: plugin tools live in an overlay per profile, keyed by its Hermes home (`tools/registry.py:449`), and the `family` profile does not enable it. Within a profile that does, a plugin toolset is on by default, even next to an explicit toolset list, until `hermes tools` saves a list without it (`hermes_cli/tools_config.py:520`). The tools also check, on every call, that the turn is a Telegram chat turn.
+
+Hermes' tool search (`tools.tool_search`, on by default) puts every plugin tool behind its `tool_search`, `tool_describe` and `tool_call` bridge (`tools/tool_search.py:150`). The model then sees a catalog entry and calls `tool_call` with the tool's name and arguments. Slice 2 keeps that default; whether the `telegram` tools should be listed directly, at the cost of their schemas in every prompt, is open (Decisions and open questions).
 
 Hermes forbids plugins to give the model a tool that lets it send messages on its own (`website/docs/developer-guide/adding-platform-adapters.md:330`). Its send engine takes any platform and chat as the target, so a model holding it could be talked by injected content into writing to other people, or could write when nobody asked. These tools keep both out of the model's hands:
 
@@ -198,7 +217,7 @@ Drafts exist only in private chats. Groups and channels keep the typing indicato
 
 - Unit tests cover pure logic: Markdown splitting within Telegram's limits, payload builders, widget validation, button tokens.
 - Integration tests run the real Hermes at `c419cf7` and the real PTB 22.8, installed as development dependencies at those pins. The adapter is built through Hermes' own plugin loading. There are no hand-written stand-ins for Hermes: six open findings of the Prism attempt are drift between its stand-ins and the real code (lumi-telegram issues #13, #15, #20, #30, #31, #46).
-- End-to-end checks reuse Hermes' own messaging-adapter contract (`tests/e2e/core/platforms/` at the pin). It starts a real `hermes gateway run` child with a fake model and Hermes' Bot API stand-in (`tests/fakes/platforms/telegram_standin.py`) behind the PTB base URL. `checks/e2e/` runs its scenarios unchanged against this plugin. The stand-in answers only the methods the bundled adapter calls and returns 404 for anything else. The slices that add methods (`sendRichMessage`, `sendRichMessageDraft`, `sendWidget`, `answerWidgetQuery`, `sendPoll`) extend it in a subclass in this repository, with each method checked against its documented limits.
+- End-to-end checks reuse Hermes' own messaging-adapter contract (`tests/e2e/core/platforms/` at the pin). It starts a real `hermes gateway run` child with a fake model and Hermes' Bot API stand-in (`tests/fakes/platforms/telegram_standin.py`) behind the PTB base URL. `checks/e2e/` runs its scenarios unchanged against this plugin. The stand-in answers only the methods the bundled adapter calls and returns 404 for anything else. The slices that need methods it lacks (`sendRichMessage`, `sendVideo`, `sendAudio`, `sendVoice`, `sendAnimation`, `sendMediaGroup`, then `sendRichMessageDraft`, `sendWidget`, `answerWidgetQuery`, `sendPoll`) extend it in a subclass in this repository, with each method checked against its documented limits. The rich sender's failure handling runs a real PTB `Bot` against the stand-in in process, with connection failures injected in httpx's transport (`checks/e2e/test_sender.py`).
 - Live acceptance is done by the owner on `vtadevbot`, with a checklist per slice. The bot token stays in 1Password and on the host, never in this repository or in a test.
 
 ## Slices
@@ -221,7 +240,10 @@ Decided by the owner on PR #1, 2026-11-25:
 2. The tool set stands, plus stickers ("Норм, я бы еще стикеры добавил бы").
 3. The three guards under Tools (no recipient chosen by the model, only in user-started Telegram turns, a cap per turn) are the accepted reading of Hermes' rule against a general send tool ("Yes, guards are fine").
 
-No questions are open.
+Open, asked by push on 2026-11-25:
+
+4. Should the `telegram` tools be listed to the model directly (`tools.tool_search.defer` or a direct-surface entry), instead of behind the tool search bridge? Direct listing costs their schemas in every prompt; the bridge costs a lookup before the first call. Slice 2 keeps Hermes' default, the bridge.
+5. Q12: can the owner share the gateway log lines for a failed file send (`Skipping MEDIA directive path`, or Telegram's refusal)? The fix in slice 2 makes those failures visible either way.
 
 ## Out of scope
 
