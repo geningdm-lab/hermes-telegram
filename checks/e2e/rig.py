@@ -48,11 +48,20 @@ from tests.e2e.core.platforms import _suite  # noqa: E402
 from tests.e2e.core.platforms._drv_telegram import TelegramDriver  # noqa: E402
 from tests.e2e.core.platforms._helpers import GatewayUnderTest  # noqa: E402
 
+from checks.e2e.standin import RichTelegramStandin  # noqa: E402  (imports Hermes' stand-in)
+
 __all__ = ["C", "PluginGatewayUnderTest", "PluginTelegramDriver", "rig_fixtures"]
 
 
 class PluginTelegramDriver(TelegramDriver):
-    """Hermes' Telegram driver, with this plugin enabled in the gateway's configuration."""
+    """Hermes' Telegram driver, with this plugin enabled and a stand-in that knows rich messages.
+
+    Hermes' own stand-in answers ``sendRichMessage`` with 404, which the adapter takes as "no rich messages
+    here" and remembers for the process; the extended one answers it as the Bot API documents.
+    """
+
+    def __init__(self) -> None:
+        self.standin = RichTelegramStandin()
 
     def gateway_config(self) -> dict[str, Any]:
         return C.merge(super().gateway_config(), {"plugins": {"enabled": ["platforms/telegram"]}})

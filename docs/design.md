@@ -128,6 +128,15 @@ The agent keeps writing ordinary Markdown. The adapter chooses the form:
 - `MEDIA:` lines and `[[audio_as_voice]]` keep working, because other tools and skills emit them.
 - The prompt hint is rewritten: tables, task lists and the tools below are allowed and described.
 
+How slice 1 does it (`hermes_telegram/rich.py`, `hermes_telegram/answers.py`):
+
+- It overrides the predicates and payload of the harvested rich path; it does not rewrite the send. The harvested path already handles reply anchors (`reply_parameters`), topics, flood control and the fallback to MarkdownV2 when Telegram refuses a rich message. Rich is on unless a profile sets `rich_messages: false`; the bundled default was off.
+- "Structure" means headings, lists, task lists, quotes, tables, code, links, footnotes, rules, maths and the allowed HTML tags. Emphasis alone stays an ordinary message, which already shows bold, italic and strikethrough.
+- The Markdown sent is prepared outside code. `\(...\)` and `\[...\]` become `$...$` and `$$...$$`. A `$` that opens no maths becomes `\$`: the rule is Pandoc's, made stricter so that the first `$` after an opening one must close it, which means "$5 and $10" stays two prices. A `<` that starts none of the allowed tags (`<u>`, `<details>`, `<tg-spoiler>` and the like) or an autolink becomes `\<`, so `List<String>` is shown as written. `<tg-button>` is not allowed in text, because buttons come from the tools, which own their callback data.
+- The size checked against 32768 is that of the prepared Markdown, escapes and hard line breaks included, not the agent's text. Telegram does not publish its block count, so the cut uses a conservative estimate (400 against 500). A part Telegram still refuses was not delivered: it is cut in half and resent, twice at most, and then sent as MarkdownV2 chunks rather than lost.
+- A failure after some parts landed returns Hermes' `partial_overflow` result. Only the unsent parts are resumed, so no part appears twice.
+- The bundled guards for Telegram Desktop stay. Text with CJK characters, and maths inside `<details>`, still take the MarkdownV2 path (tdesktop#30808, Hermes #47653). This plugin does not prove those client bugs; it keeps the bundled behaviour.
+
 ### Tools
 
 Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. A profile gets them only if its toolsets include `telegram`; the `family` profile lists its toolsets explicitly, so it gets none until the owner adds it.
