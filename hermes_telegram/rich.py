@@ -38,6 +38,7 @@ _MARK_RE = re.compile(r"==[^=\s](?:[^=\n]*[^=\s])?==")
 _INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)((?:(?!\n[ \t]*\n).)+?)(?<!`)\1(?!`)", re.DOTALL)
 _HTML_CODE_RE = re.compile(r"<(code|pre)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE)
 _MATH_BLOCK_LINE_RE = re.compile(r"^[ \t]*\$\$")
+_BRACKET_BLOCK_LINE_RE = re.compile(r"^[ \t]*\\\[")
 _DISPLAY_MATH_RE = re.compile(r"\$\$.+?\$\$", re.DOTALL)
 
 # HTML the agent may write inside a rich answer (rich-messages, "Rich HTML style"). Any other "<" is text
@@ -392,9 +393,13 @@ def _classify(text: str) -> list[_Line]:
             lines.append(_Line(line, 0, no_cut_before=inside))
             prev_blank = True
             continue
-        if _MATH_BLOCK_LINE_RE.match(bare) or (in_math and bare.strip().endswith("$$")):
+        if (_MATH_BLOCK_LINE_RE.match(bare) or _BRACKET_BLOCK_LINE_RE.match(bare)
+                or (in_math and bare.strip().endswith(("$$", "\\]")))):
+            # $$ ... $$, or \[ ... \] as the agent writes it (a live stream is cut before preparation).
             stripped = bare.strip()
-            one_line = stripped != "$$" and stripped.startswith("$$") and stripped.endswith("$$")
+            one_line = stripped not in ("$$", "\\[") and (
+                (stripped.startswith("$$") and stripped.endswith("$$"))
+                or (stripped.startswith("\\[") and stripped.endswith("\\]")))
             lines.append(_Line(line, 0 if in_math else 1, no_cut_before=inside, continues_item=continues))
             if not one_line:
                 in_math = not in_math

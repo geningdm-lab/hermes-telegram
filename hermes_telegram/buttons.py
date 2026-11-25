@@ -148,12 +148,14 @@ class ButtonsMixin:
                 **{k: v for k, v in thread_kwargs.items() if v is not None}}
         if reply_to_id is not None:
             base["reply_parameters"] = {"message_id": reply_to_id}
+        await self._before_message(chat_id, self._metadata_thread_id(metadata), text)  # the preview's fence
         if self._bot_supports_rich() and not getattr(self, "_rich_send_disabled", False):
             try:
                 sent = await self._bot.do_api_request("sendRichMessage",
                                                        api_kwargs={**base, "rich_message": {"markdown": prepared}})
                 message_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
-                self._reshow_soon(chat_id)
+                self._reshow_soon(chat_id, self._metadata_thread_id(metadata))
+                self._remember_bot_messages(chat_id, [SendResult(success=True, message_id=str(message_id))])
                 return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
             except Exception as exc:
                 if not self._rich_rejected(exc, "sendRichMessage with buttons", "MarkdownV2"):
@@ -165,7 +167,8 @@ class ButtonsMixin:
         except Exception as exc:
             from .harvested.adapter_module import _redact_telegram_error_text
             return SendResult(success=False, error=_redact_telegram_error_text(exc))
-        self._reshow_soon(chat_id)
+        self._reshow_soon(chat_id, self._metadata_thread_id(metadata))
+        self._remember_bot_messages(chat_id, [msg])
         return SendResult(success=True, message_id=str(msg.message_id))
 
     async def _handle_callback_query(self, update: Any, context: Any) -> None:

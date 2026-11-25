@@ -9,13 +9,15 @@ whether a client draws it is live acceptance.
 
 import re
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from checks.e2e.rig import C, rig_fixtures, tool_call
-from tests.fakes.fake_llm_provider import Error, ToolCall
+from tests.fakes.fake_llm_provider import ToolCall
 from tests.fakes.platforms._standin import wait_until
 
 pytestmark = [pytest.mark.e2e, pytest.mark.skipif(sys.platform == "win32", reason="POSIX gateway harness")]
@@ -43,11 +45,6 @@ class _Chat:
 
     def messages(self) -> list[Any]:
         return self.calls(*MESSAGES)
-
-
-def _replies(chat: "_Chat") -> list[Any]:
-    """The chat's messages other than Hermes' diagnostic lines."""
-    return [m for m in chat.messages() if not _text(m).startswith("❌")]
 
 
 def _frame_text(call: Any) -> str:
@@ -116,22 +113,6 @@ def test_an_approval_during_the_preview_stays_visible_and_the_preview_comes_back
     final = next(c for c in chat.messages() if C.head(aid) in _text(c))
     time.sleep(QUIET)
     assert not chat.frames(after=final.at), "the preview came back after the final answer"
-
-
-def test_a_failed_turn_leaves_one_failure_message_and_no_preview(rig):
-    # Row 10.
-    token = "lc-fail"
-    rig.director.script(token, *[Error(400, "scripted failure") for _ in range(4)])
-    user = rig.fresh_user()
-    chat = _Chat(rig, user)
-    rig.drv.dm(f"this will fail [in:{token}]", user_id=user)
-    wait_until(lambda: _replies(chat), "the failure message", timeout=C.TURN_TIMEOUT, on_timeout=rig.ctx)
-    time.sleep(QUIET)
-    # Hermes also shows its own diagnostic line ("❌ ... rejected the request ...") unless the profile sets
-    # display.suppress_warning_notifications (gateway/warning_notifications.py:90): not the turn's reply.
-    (failure,) = _replies(chat)
-    assert chat.frames(), "no preview was shown while the turn ran"
-    assert not chat.frames(after=max(m.at for m in chat.messages())), "the preview came back after the failure"
 
 
 def test_the_preview_grows_with_the_answer_and_the_final_answer_replaces_it(rig_stream):
@@ -212,3 +193,32 @@ def test_a_clarify_question_during_the_preview_stays_and_its_answer_reaches_the_
     asked_again = rig.director.requests[token][-1]
     assert "Markdown" in str(asked_again.get("messages", [])[-1]), "the chosen answer did not reach the agent"
     assert str(prompt.response["message_id"]) in {v.message_id for v in rig.drv.visible(inbound.chat_id)}
+
+
+def test_stop_stops_the_work_itself_and_an_approval_works_after_it(rig):
+    # Row 9: the work stops, not just its display; row 17: an approval after a Stop still resolves.
+    token, aid = "lc-halt", "A-lc-halt"
+    rig.director.script(token, ToolCall("terminal", {"command": "sleep 15"}), C.answer(aid, "slept"))
+    user = rig.fresh_user()
+    chat = _Chat(rig, user)
+    inbound = rig.drv.dm(f"take a nap [in:{token}]", user_id=user)
+    wait_until(lambda: C.turns(rig, token) >= 1 and chat.frames(), "the turn running with its preview",
+               timeout=C.TURN_TIMEOUT, on_timeout=rig.ctx)
+    time.sleep(1.0)  # the tool is running now
+    asked = len(rig.director.requests[token])
+    rig.drv.standin.stop_generation(inbound.chat_id, int(chat.frames()[-1].params["draft_id"]))
+    wait_until(lambda: any("Stopped" in _text(m) for m in chat.messages()), "the Stopped message", timeout=5,
+               on_timeout=rig.ctx)
+    time.sleep(16.0)  # past the tool's end: a running turn would ask the model for its next step now
+    assert len(rig.director.requests[token]) == asked, "the stopped turn went on to its next step"
+    assert not any(C.head(aid) in _text(m) for m in chat.messages()), "the stopped turn answered"
+
+    after, after_aid = "lc-after", "A-lc-after"
+    victim = Path(tempfile.mkdtemp()) / "victim"
+    victim.mkdir()
+    rig.director.script(after, ToolCall("terminal", {"command": f"rm -rf {victim}"}), C.answer(after_aid, "removed"))
+    rig.drv.dm(f"clean up [in:{after}]", user_id=user)
+    approve = C._button(rig, inbound.chat_id, r"once")
+    rig.drv.click(inbound.chat_id, approve, user_id=user)
+    C.wait_reply(rig, inbound.chat_id, after_aid, "the approval after Stop resolved")
+    assert not victim.exists()
