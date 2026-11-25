@@ -1,3 +1,6 @@
+# The two methods below are copied from NousResearch/hermes-agent@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee:
+# plugins/platforms/telegram/adapter.py (TelegramAdapter._start_polling_once, TelegramAdapter._start_webhook_mode),
+# with one argument changed. Copyright (c) 2025 Nous Research. MIT License: see harvested/LICENSE.hermes.
 """The update kinds this plugin asks Telegram for (docs/design.md, Turn lifecycle; slice 3).
 
 The harvested polling and webhook start ask for ``Update.ALL_TYPES``, python-telegram-bot 22.8's list,

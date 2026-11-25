@@ -14,6 +14,7 @@ import asyncio
 import contextvars
 import hashlib
 import re
+import time
 from collections import OrderedDict, deque
 from datetime import timedelta
 from typing import Any, Optional
@@ -33,6 +34,7 @@ _MAX_RESPLITS = 2
 # Below this a refused part is not cut further: it goes as MarkdownV2 chunks.
 _MIN_PART_CHARS = 1000
 _SEALED_MEMORY = 64  # heads of streamed answers the consumer is about to send
+_SEALED_TTL = 120.0  # seconds a head's record waits for its send
 
 
 def _digest(text: str) -> str:
@@ -80,13 +82,14 @@ class RichAnswersMixin:
         """The ordinary (MarkdownV2) path shows ``\\$`` as written, so the hint's escape is undone first."""
         return super().format_message(rich.unescape_dollars(content))
 
-    def _rich_eligible_any_length(self, content: str) -> bool:
-        """``_rich_eligible`` without the one-message size check: a long answer is cut, not degraded."""
+    def _rich_eligible_any_length(self, content: str, *, part: bool = False) -> bool:
+        """``_rich_eligible`` without the one-message size check: a long answer is cut, not degraded. A
+        ``part`` of a rich answer is rich whether or not its own text has structure."""
         return bool(
             self._rich_delivery_enabled()
             and not getattr(self, "_rich_send_disabled", False)
             and content and content.strip()
-            and self._needs_rich_rendering(content)
+            and (part or self._needs_rich_rendering(content))
             and not self._has_telegram_desktop_details_math_crash_shape(content)
             and (getattr(self, "_allow_cjk_rich_messages", False)
                  or not self._has_telegram_desktop_cjk_rich_garble_shape(content))
@@ -99,32 +102,51 @@ class RichAnswersMixin:
     def truncate_message(self, content: str, max_length: int = 4096, len_fn: Any = None) -> list[str]:
         """Above an ordinary message's length only Hermes' stream consumer cuts (``_split_first_send``, at
         the rich overflow limit): a rich answer streaming past it is cut where ``rich.split_markdown`` cuts,
-        keeping code, tables and formulas whole, instead of by the ordinary truncator. The parts are prepared
-        Markdown, which the sender prepares again unchanged (``prepare_markdown`` is idempotent)."""
-        if max_length > self.MAX_MESSAGE_LENGTH and self._rich_eligible_any_length(content):
-            parts = rich.split_markdown(rich.prepare_markdown(content), char_budget=min(max_length, rich.CHAR_BUDGET))
-            self._remember_sealed_heads(parts[:-1])
-            return parts
-        return super().truncate_message(content, max_length, len_fn=len_fn)
+        keeping code, tables and formulas whole, instead of by the ordinary truncator.
 
-    def _sealed_heads(self) -> "OrderedDict[str, None]":
-        return self.__dict__.setdefault("_hermes_telegram_sealed_heads", OrderedDict())
+        The parts stay the agent's Markdown: the consumer keeps the last one as the live text it appends to,
+        so it must not be prepared yet (a trailing ``$x`` would become ``\\$x`` before its ``^2$`` arrives).
+        The consumer measures in its own units (UTF-16 for Telegram), so the cut is scaled to them."""
+        if max_length <= self.MAX_MESSAGE_LENGTH or not self._rich_eligible_any_length(content):
+            return super().truncate_message(content, max_length, len_fn=len_fn)
+        budget = min(max_length, rich.CHAR_BUDGET)
+        measured = (len_fn or len)(content)
+        if measured > len(content) > 0:
+            budget = max(rich.CHAR_BUDGET // 32, budget * len(content) // measured)
+        parts = rich.split_markdown(content, char_budget=budget)
+        if len(parts) < 2:
+            return super().truncate_message(content, max_length, len_fn=len_fn)
+        self._remember_sealed_heads(parts[:-1])
+        return parts
+
+    def _sealed_heads(self) -> "OrderedDict[str, float]":
+        """Digest of a head the stream consumer is about to send -> when the record lapses."""
+        sealed = self.__dict__.setdefault("_hermes_telegram_sealed_heads", OrderedDict())
+        now = time.monotonic()
+        for digest in [d for d, until in sealed.items() if until < now]:
+            del sealed[digest]
+        return sealed
 
     def _remember_sealed_heads(self, heads: list[str]) -> None:
-        """The heads the stream consumer will send next. It never edits them (``_split_first_send`` drops
-        their message id) though it sends them with ``expect_edits``; ``_send_text_locked`` knows them by
-        their text, as the consumer cleans it for display, and sends them as rich messages."""
+        """The heads the stream consumer will send next, from this one cut. It never edits them
+        (``_split_first_send`` drops their message id) though it may send them with ``expect_edits``;
+        ``_send_text_locked`` knows them by their text, as the consumer cleans it for display, and sends them
+        as parts of a rich answer. A record is used once, or lapses after ``_SEALED_TTL``."""
         try:
             from gateway.stream_consumer import GatewayStreamConsumer
             clean = GatewayStreamConsumer._clean_for_display
         except Exception:
             clean = None
         sealed = self._sealed_heads()
+        until = time.monotonic() + _SEALED_TTL
         for head in heads:
             for text in {head, clean(head) if clean else head}:
-                sealed[_digest(text)] = None
+                sealed[_digest(text)] = until
         while len(sealed) > _SEALED_MEMORY:
             sealed.popitem(last=False)
+
+    def _is_sealed_head(self, content: str) -> bool:
+        return _digest(content) in self._sealed_heads()
 
     def _certainly_unsent(self, exc: BaseException) -> bool:
         """Telegram certainly did not show the message: it refused it with a flood wait, or the request never
@@ -190,10 +212,10 @@ class RichAnswersMixin:
     ) -> SendResult:
         """Every rich answer goes through ``_send_items``; everything else takes the harvested path."""
         sealed = self._sealed_heads()
-        if (metadata or {}).get("expect_edits") and _digest(content) in sealed:
-            del sealed[_digest(content)]
+        head = sealed.pop(_digest(content), None) is not None  # a part of a streamed rich answer
+        if head:
             metadata = {k: v for k, v in (metadata or {}).items() if k != "expect_edits"}
-        if (metadata or {}).get("expect_edits") or not self._rich_eligible_any_length(content):
+        if (metadata or {}).get("expect_edits") or not self._rich_eligible_any_length(content, part=head):
             return await super()._send_text_locked(chat_id, content, reply_to, metadata)
         thread_id = self._metadata_thread_id(metadata)
         if self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id) is None:

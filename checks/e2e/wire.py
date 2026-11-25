@@ -81,9 +81,11 @@ class Sender:
 
 
 @pytest.fixture(name="sender")
-async def sender_fixture() -> AsyncIterator[Sender]:
+async def sender_fixture(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Sender]:
     from telegram import Bot
     from telegram.request import HTTPXRequest
+
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", CHAT)  # the adapter's own admission, without a gateway
 
     standin = MediaTelegramStandin().start()
     wire = Wire()
