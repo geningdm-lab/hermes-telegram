@@ -32,8 +32,8 @@ scripts/hermes-src.sh
 
 ## Upgrading Hermes
 
-1. Change the pin in `scripts/harvest.py` (`PIN`), in `pyproject.toml` (the `hermes-agent` URL and the mirrored `[tool.uv]` overrides) and run `mise exec -- uv sync`.
-2. `scripts/hermes-src.sh`, then `.venv/bin/python scripts/harvest.py --src .cache/hermes-agent`. A method the upstream class added, removed or renamed stops the harvest until it is assigned in `METHOD_GROUPS`.
+1. Write the new commit to `HERMES_PIN`, the one input every tool reads. Put the same commit in the `hermes-agent` URL of `pyproject.toml`, mirror that commit's `[tool.uv]` overrides there, and run `mise exec -- uv sync`. `checks/test_harvest.py` fails while the two disagree.
+2. Run `scripts/hermes-src.sh`, then `.venv/bin/python scripts/harvest.py --src .cache/hermes-agent`. The harvest reads the pinned commit's objects, not the checkout's working files. A method that the upstream class added, removed or renamed stops the harvest until it is assigned in `METHOD_GROUPS`.
 3. Review the diff of `hermes_telegram/harvested/` and run the checks.
 
 ## Boundaries
