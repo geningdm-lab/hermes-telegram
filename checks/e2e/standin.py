@@ -35,10 +35,15 @@ def _check_rich(p: dict[str, Any]) -> str:
     text = str(rich["markdown"])
     if len(text) > RICH_MAX_CHARS:
         raise BotApiError("Bad Request: rich message is too long")
-    for line in text.splitlines():
-        if re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", line):
-            columns = len([c for c in line.strip().strip("|").split("|")])
-            if columns > RICH_MAX_COLUMNS:
+    in_fence = False
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+        # A table is a header row followed by its separator row; anything else is not one.
+        elif (not in_fence and i > 0 and "|" in lines[i - 1]
+              and re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", line)):
+            if len(line.strip().strip("|").split("|")) > RICH_MAX_COLUMNS:
                 raise BotApiError("Bad Request: too many table columns")
     return text
 
@@ -55,7 +60,7 @@ class RichTelegramStandin(TelegramStandin):
         mid = str(msg["message_id"])
         with self._lock:
             self._visible[(str(p["chat_id"]), mid)] = Visible(mid, text, extra={"kind": "rich"})
-        msg["rich_message"] = {"markdown": text}
+        msg["rich_message"] = {"blocks": []}  # a RichMessage, as types/richmessage.md shapes it
         return msg
 
     def _m_editMessageText(self, p: dict[str, Any]) -> dict[str, Any]:
@@ -72,4 +77,4 @@ class RichTelegramStandin(TelegramStandin):
                 vis.edits += 1
                 vis.extra["kind"] = "rich"
         return {"message_id": int(mid), "date": 0, "chat": self._chat(chat_id), "from": self._bot_user(),
-                "rich_message": {"markdown": text}}
+                "rich_message": {"blocks": []}}

@@ -45,3 +45,45 @@ Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:68fdbdc` (the four f
 | [P3] Sibling loggers lost their absolute upstream names | they log as `plugins.platforms.telegram.<module>`; `test_module_loggers_keep_their_upstream_names` compares real names |
 | [P3] Log rotation breaks the per-start check | the rig compares file identity and reads a replacement file from its start |
 | [P3] The clean-tree check aborts non-e2e runs | `checks/e2e/conftest.py` skips collecting the directory under `-m "not e2e"` |
+
+## Slice 1, PR #3
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:ba1bb2e` at `0e0f16d`, 2026-11-25. Twenty-four findings: twenty-one accepted and fixed, two accepted and moved to slice 3, one accepted in part.
+
+### Accepted and fixed
+
+| Finding | Fix |
+|---|---|
+| [P1] A literal NUL stalls preparation | placeholders carry a random token and are restored newest first, once each; `test_a_literal_nul_does_not_stall_preparation` |
+| [P1] A repeated header that fills the budget stalls the cut | a header over half the budget is not repeated; line pieces never get a budget under 1; `test_a_header_that_fills_the_budget_does_not_stall_the_cut` |
+| [P1] Inline formula source escaped (`$x \< y$`) | inline maths is set aside whole before escaping |
+| [P1] Hard breaks added inside `$$` blocks and `~~~` fences | `rich.prepare_markdown` adds hard breaks itself, in prose only and not in table rows; the harvested normalizer is no longer used |
+| [P1] A part resumed after an ambiguous failure may be shown twice | a failed part is resumable only when it was certainly not sent (a flood wait, or no connection); `test_only_a_certainly_unsent_part_is_kept_for_resuming` |
+| [P1] A fenced line longer than a message loses its fence and spaces | each piece of the line is closed and reopened in its fence, every character kept |
+| [P2] A forbidden cut is still taken when all are forbidden | a maths or details block over the budget but within Telegram's limit is kept whole |
+| [P2] `\[...\]` is not seen by the cut | the answer is prepared first and the prepared text is cut |
+| [P2] A loose list item's second paragraph becomes its own message | indented continuations and nested items rank as inside the item |
+| [P2] A footnote reference and its definition end up in different messages | each part gets copies of the definitions its references need |
+| [P2] Code contents escaped inside `<code>`, `<pre>` and multi-line code spans | those are set aside before escaping |
+| [P2] The capability latch is ignored inside a multipart send | once rich messages are latched off, the remaining parts go as MarkdownV2 without further rich calls |
+| [P2] A flood refusal of a rich part does not arm the chat cooldown | `_record_send_flood_cooldown` on a rich `retry_after` |
+| [P2] A refused one-part answer goes straight to MarkdownV2 | every rich answer goes through `_send_items` and is cut smaller on refusal |
+| [P2] MarkdownV2 fallback chunks carry unescaped `(1/2)` counters | the harvested sender's counter escaping is reused |
+| [P2] The thread fallback state is dropped between chunks | carried through the send and its resume, and reported |
+| [P2] The ordinary path shows the hint's `\$` with its backslash | `format_message` undoes `\$` outside code before MarkdownV2 |
+| [P2] `==highlight==` alone does not go rich | `needs_rich` recognizes it |
+| [P2] The stand-in's column limit fires on separator-shaped lines outside tables | it checks only a header row followed by its separator, outside code |
+| [P2] The refusal test passes for a retry of the same payload | the refusal now fires every time the answer is sent whole |
+| [P3] The table test does not check header, separator or order | it checks the whole table verbatim |
+| [P3] The stand-in returns an input shape as `Message.rich_message` | it returns a `RichMessage` (`blocks`) |
+
+### Accepted, moved to slice 3
+
+Two findings are about streamed answers. Slice 3 rebuilds the streaming lifecycle (drafts, previews, Stop), so they are fixed there. Neither is a regression: before slice 1, streamed answers took the MarkdownV2 path in every case.
+
+- [P1] An answer finalized by editing a preview (DM topics, edit-based streaming) over one rich message's limits is formatted as MarkdownV2 instead of being sent as rich parts.
+- [P1] A private-chat answer streaming past the overflow limit is cut by Hermes' stream consumer with the ordinary truncator (`gateway/stream_consumer.py:804`), and its sealed heads go as MarkdownV2 with `expect_edits=True`.
+
+### Disputed in part
+
+**[P2] Protect code contents, not just their HTML tags.** `<code>`, `<pre>` and multi-line code spans are fixed. Not fixed: GFM indented code blocks (four spaces) are still treated as prose. The reason is that inside a list, the same indentation is an item's continuation (CommonMark), and the cut already gives that meaning to indented lines (`continues_item`). Telling the two apart needs a full CommonMark block parser. The agent writes fenced code, which the hint asks for. Reopen if live answers show an indented code block with escaped `$` or `<`.

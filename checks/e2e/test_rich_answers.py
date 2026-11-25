@@ -51,8 +51,7 @@ def test_a_table_arrives_as_one_rich_message_with_every_cell(rig):
     answer = _Answer(rig, "table", "Here it is:\n\n" + table + "\n")
     sent = answer.calls("sendRichMessage")
     assert len(sent) == 1, rig.ctx()
-    for row in rows:
-        assert row in _markdown(sent[0])
+    assert table in _markdown(sent[0])  # the whole table, header and separator included, rows in order
     assert not answer.calls("sendMessage"), "a piece of the table answer went as a plain message"
 
 
@@ -89,12 +88,16 @@ def test_a_long_formatted_answer_arrives_whole_in_order_as_rich_messages(rig):
 def test_a_part_telegram_refuses_is_sent_again_smaller_and_nothing_is_lost(rig):
     # Telegram counts blocks its own way: a part it refuses was not delivered, so it is cut and resent.
     sections = [f"## Section {i}\n\n" + " ".join(f"w{i * 1000 + j:05d}" for j in range(400)) + "\n"
-                for i in range(30, 45)]
+                for i in range(30, 40)]  # about 28,000 characters: one part, refused whole
     body = "\n".join(sections)
+    # Refused every time it is sent whole, so only a smaller retry can get it through.
     refused = rig.drv.standin.fail(
         "sendRichMessage", {"ok": False, "error_code": 400, "description": "Bad Request: too many blocks"},
-        status=400, times=1, match=lambda p: "w38000" in str(p.get("rich_message")))
+        status=400, times=100, match=lambda p: "w30000" in str(p.get("rich_message"))
+        and "w39399" in str(p.get("rich_message")))
     answer = _Answer(rig, "refused", body)
-    assert refused.fired == 1, "the injected refusal never fired"
+    assert refused.fired >= 1, "the injected refusal never fired"
     sent = answer.calls("sendRichMessage")
+    assert len(sent) >= 2
     assert [w for c in sent for w in _words(_markdown(c))] == _words(body), rig.ctx()
+    assert not answer.calls("sendMessage"), "the refused answer fell back to plain messages"

@@ -28,7 +28,17 @@ ADAPTER_LOGGER_ARG = ast.parse('__name__.rpartition(".harvested.")[0] + ".adapte
 MACHINERY = {"_abc_impl", "__annotate_func__", "__annotate__", "__annotations_cache__"}
 # Members this plugin overrides on purpose, with the class that does it. Any other member of the composed
 # adapter must be the harvested one.
-INTENDED_OVERRIDES: dict[str, str] = {}
+INTENDED_OVERRIDES: dict[str, str] = {
+    # Slice 1, docs/design.md "How slice 1 does it".
+    "__init__": "RichAnswersMixin",
+    "_needs_rich_rendering": "RichAnswersMixin",
+    "_rich_message_payload": "RichAnswersMixin",
+    "_content_fits_rich_limits": "RichAnswersMixin",
+    "format_message": "RichAnswersMixin",
+    "_rich_transient_result": "RichAnswersMixin",
+    "_send_text_locked": "RichAnswersMixin",
+    "_resume_partial_send": "RichAnswersMixin",
+}
 
 
 class _Normalize(ast.NodeTransformer):
