@@ -18,6 +18,7 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
 
 import hashlib
 import re
+import zlib
 from typing import Any
 
 from aiohttp import web
@@ -257,6 +258,46 @@ class MediaTelegramStandin(RichTelegramStandin):
         if not isinstance(sticker, str) or not sticker:
             raise BotApiError("Bad Request: sticker must be a file_id")
         return self._bot_message(p, _kind="sticker", sticker=self._sticker(sticker, ""))
+
+    # Widgets (slice 5): sendwidget.md, answerwidgetquery.md, editmessagewidgetdata.md, types/widgetquery.md, and
+    # the limits as bots/widgets states them (private chats only in production; 32768 bytes, 4096 after zlib 9).
+
+    def _m_sendWidget(self, p: dict[str, Any]) -> dict[str, Any]:
+        if int(p.get("chat_id") or 0) <= 0:
+            raise BotApiError("Bad Request: widgets can be sent only to private chats")
+        html = str(p.get("html") or "")
+        if not html or "\x00" in html:
+            raise BotApiError("Bad Request: INPUT_MEDIA_WIDGET_HTML_INVALID")
+        raw = html.encode("utf-8")
+        if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
+            raise BotApiError("Bad Request: INPUT_MEDIA_WIDGET_TOO_LARGE")
+        for key in ("chat_data", "public_data"):
+            if len(str(p.get(key) or "").encode("utf-8")) > 1024:
+                raise BotApiError(f"Bad Request: {key} is too long")
+        widget = {"html": html, **{k: p[k] for k in ("height", "width", "chat_data", "public_data") if k in p}}
+        return self._bot_message(p, _kind="widget", caption=p.get("caption", ""), widget=widget)
+
+    def _m_answerWidgetQuery(self, p: dict[str, Any]) -> bool:
+        if len(str(p.get("data") or "").encode("utf-8")) > 1024:
+            raise BotApiError("Bad Request: data is too long")
+        return True
+
+    def _m_editMessageWidgetData(self, p: dict[str, Any]) -> bool:
+        with self._lock:
+            vis = self._visible.get((str(p["chat_id"]), str(p["message_id"])))
+            if vis is None or vis.extra.get("kind") != "widget":
+                raise BotApiError("Bad Request: message is not a widget")
+            vis.extra["chat_data"] = p.get("chat_data")
+        return True
+
+    def widget_query(self, user_id: int, chat_id: Any, message_id: int, data: str) -> dict[str, Any]:
+        """The widget in ``message_id`` calls TelegramWidget.request(data)."""
+        self._widget_queries = getattr(self, "_widget_queries", 0) + 1
+        update = {"update_id": next(self._update_ids), "widget_query": {
+            "id": f"wq-{self._widget_queries}", "from": self._user(user_id), "chat": self._chat(chat_id),
+            "message_id": int(message_id), "chat_instance": "ci-1", "type": {"type": "data"}, "data": data}}
+        self._push(update)
+        return update
 
     def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         media = p.get("media")

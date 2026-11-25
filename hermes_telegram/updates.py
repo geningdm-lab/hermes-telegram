@@ -26,8 +26,10 @@ from .harvested.adapter_transport import (
     os,
 )
 
-# Bot API kinds python-telegram-bot 22.8 does not list, that this plugin handles. Slice 5 adds widget_query.
-EXTRA_UPDATE_KINDS = ("stopped_message_generation",)
+# Bot API kinds python-telegram-bot 22.8 does not list, that this plugin handles: the Stop button (slice 3) and
+# widget requests (slice 5). shared_widget_query comes from forwards of shared widgets, which production
+# Telegram does not have yet (bots/widgets, Availability).
+EXTRA_UPDATE_KINDS = ("stopped_message_generation", "widget_query")
 
 
 def allowed_updates() -> list[str]:

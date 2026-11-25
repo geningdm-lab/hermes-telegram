@@ -202,6 +202,13 @@ Rules:
 - A widget query is answered at once with an acknowledgement, because Telegram allows 15 s. The agent's real answer arrives as a chat message, or as new widget state through `telegram_message`.
 - Pressing Stop is not an event for the agent: it stops the turn (next section).
 
+How slice 5 does it (`hermes_telegram/widgets.py`, `hermes_telegram/tools.py`):
+
+- `telegram_widget(html, caption?, height?, state?)` sends a widget with `allow_queries`, after `check_widget` holds the HTML to Telegram's limits as the server counts them (at most 32768 bytes of UTF-8 and 4096 bytes after zlib at level 9, no NUL) and to the sandbox (no network API, nothing loaded from outside: a widget relying on either would not work on the device). A refusal goes back to the agent with the reason. Private chats only, as in production Telegram; a widget counts towards the cap.
+- `widget_query` is asked for alongside the Stop button's update (`EXTRA_UPDATE_KINDS`). Each query is answered at once, without data, since Telegram allows 15 s; then it reaches the agent as `[widget] data="<data>" on widget <message id>` from the user who tapped, built as a tap is (an id of its own, the answer replying to the widget). The same request from the same widget and user within 10 s reaches the agent once: a widget may repeat a request every 5 s while visible, and neither Telegram nor the bot can tell that from a tap.
+- `telegram_message(op=widget_state, message_id, state)` sets one of the bot's widgets' chat state (`editMessageWidgetData`), which the widget redraws from.
+- Row 13 (interaction inside a widget reaches nobody) holds by construction: only `TelegramWidget.request` leaves the device. How clients draw widgets is live acceptance.
+
 How slice 4 does it (`hermes_telegram/buttons.py`, `hermes_telegram/actions.py`, `hermes_telegram/tools.py`):
 
 - `telegram_send` takes `text` and `buttons` (one per row; each a choice with `value`, a link with `url`, or `copy`; an optional `style`) and `single_use` (default true). The message is one rich message carrying its inline keyboard, or MarkdownV2 with the same keyboard when Telegram refuses the rich one.
