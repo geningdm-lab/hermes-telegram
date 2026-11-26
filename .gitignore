@@ -10,3 +10,4 @@ dist/
 *.pem
 report.xml
 junit*.xml
+.cache/

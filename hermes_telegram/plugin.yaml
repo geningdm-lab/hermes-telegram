@@ -1,0 +1,41 @@
+# The manifest of the bundled Telegram plugin (hermes-agent@c419cf7: plugins/platforms/telegram/plugin.yaml),
+# with this plugin's version and description. The name and the install path
+# $HERMES_HOME/plugins/platforms/telegram/ give it the bundled plugin's key, platforms/telegram,
+# so Hermes loads this plugin instead of the bundled one.
+name: telegram-platform
+label: Telegram
+kind: platform
+version: 0.1.0
+description: >
+  Telegram gateway adapter for Hermes Agent from hermes-telegram: the bundled
+  adapter's transport, authorization and routing, with the Bot API's
+  presentation surface for the agent (rich messages, previews with Stop,
+  widgets, buttons, polls, stickers).
+author: dmgening
+requires_env:
+  - name: TELEGRAM_BOT_TOKEN
+    description: "Telegram bot token from @BotFather"
+    prompt: "Telegram bot token"
+    url: "https://t.me/BotFather"
+    password: true
+optional_env:
+  - name: TELEGRAM_ALLOWED_USERS
+    description: "Comma-separated Telegram user IDs allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: TELEGRAM_ALLOW_ALL_USERS
+    description: "Allow any Telegram user to trigger the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: TELEGRAM_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery"
+    prompt: "Home channel ID"
+    password: false
+  - name: TELEGRAM_HOME_CHANNEL_NAME
+    description: "Display name for the Telegram home channel"
+    prompt: "Home channel display name"
+    password: false
+  - name: TELEGRAM_WEBHOOK_SECRET
+    description: "Secret token Telegram sends with each webhook update (required with TELEGRAM_WEBHOOK_URL)"
+    prompt: "Webhook secret"
+    password: true

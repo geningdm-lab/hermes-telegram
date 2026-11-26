@@ -12,3 +12,10 @@ Read README.md and docs/design.md before changing anything. The design's accepta
 - Agent tools act only in the chat and topic of the calling turn.
 - No tokens, auth stores, transcripts, personal records or runtime databases in Git. Use synthetic fixtures.
 - Owner review happens on GitHub pull requests. Never merge without the owner's approval.
+
+## Per slice
+
+- One slice of docs/design.md per pull request, in order.
+- When a slice is ready, run an independent review: Codex with `gpt-6.2-astra` at effort `high` through `llm-bridge` against the slice's branch. Fix the findings you accept. Record each finding you dispute in docs/review-log.md with the evidence and what would reopen it.
+- Product questions (what the owner sees or decides, not how the code does it) go to the owner as a push notification, not into code as a guess.
+- Tests run in `checks/` (`.venv/bin/pytest`; `-m "not e2e"` skips the gateway runs). The session's Hermes home is a throwaway one (checks/conftest.py); never point a test at a real profile.

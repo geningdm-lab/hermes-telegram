@@ -87,11 +87,19 @@ We do not copy the bundled adapter whole. Its transport, authorization and routi
 | Approval, clarify, slash confirm, model picker, `inline_picker.py` | Hermes' own button flows | Extract |
 | Send, edit, draft, MarkdownV2 conversion, hint | The narrow protocol | Rewrite |
 
-Which functions move and how is decided in slice 0 by reading each piece. The table states the intent, not a measured result.
+How slice 0 did it:
+
+- `scripts/harvest.py` generates `hermes_telegram/harvested/` from the pinned source and is the only writer of that directory. Sibling modules are copied whole. The `TelegramAdapter` class (6697 lines, 344 methods) is split into ten mixins, one per concern: core, access, topics, transport, events, prompts, pacing, groups, inbound, and outbound_legacy. Each method lands in exactly one mixin, with its body unchanged.
+- The only rewrites are mechanical, and each file's header lists them. Sibling imports become relative. Four references to the class name point at the owning mixin. One `sys.path.insert` is dropped: upstream it added the repository root to the path, but from a user plugin directory it would add `$HERMES_HOME/plugins`.
+- `HermesTelegramAdapter` composes the mixins on the bundled class's own bases. Its members equal the upstream class's one for one. `checks/test_harvest.py` compares every member and module with the installed Hermes by AST.
+- On a re-harvest after a Hermes upgrade, a method the map does not name stops the run, so a change upstream is assigned deliberately.
+- `outbound_legacy` holds today's narrow protocol (about 1700 lines). It stays only so the plugin works at parity from slice 0. Slices 1 to 3 override its public methods with new ones, and the harvest drops what is no longer called.
+
+The measured split by concern: about 5000 of the class's lines are transport, authorization, topics, group gating, inbound handling and Hermes' own prompts, which are kept. About 1700 are the outbound protocol, which is replaced.
 
 ### Transport
 
-The plugin stays on python-telegram-bot 22.8, which the Hermes environment already ships, so the harvested code keeps working and other plugins' `register_telegram_handler` handlers, which are PTB handlers (`hermes_cli/plugins.py:848`), keep receiving updates. Methods from Bot API 10.1 on go through `Bot.do_api_request`, as the bundled adapter already does for `sendRichMessage` (`adapter.py:1509`), with our own typed payload builders. Update kinds PTB does not model (`widget_query`, `stopped_message_generation`) are read from the raw update; we assume PTB keeps unknown fields in `api_kwargs`. Slice 0 verifies that assumption against PTB 22.8 and a recorded update, before anything depends on it. The subscription asks for those update kinds explicitly in `allowed_updates`.
+The plugin stays on python-telegram-bot 22.8, which the Hermes environment already ships, so the harvested code keeps working and other plugins' `register_telegram_handler` handlers, which are PTB handlers (`hermes_cli/plugins.py:848`), keep receiving updates. Methods from Bot API 10.1 on go through `Bot.do_api_request`, as the bundled adapter already does for `sendRichMessage` (`adapter.py:1509`), with our own typed payload builders. Update kinds PTB does not model (`widget_query`, `stopped_message_generation`) are read from the raw update. Verified in slice 0 on PTB 22.8: `Update.de_json` keeps an unknown update kind in `Update.api_kwargs`, and an unknown field of a known type (`Message.rich_message`) in that object's `api_kwargs`. `TypeHandler(Update)` receives such updates, but `effective_chat` is `None` for them, so the adapter reads chat and sender from the raw payload. The subscription asks for those update kinds explicitly in `allowed_updates`.
 
 The PTB version is not ours to choose, and there is nothing newer to choose:
 
@@ -103,6 +111,7 @@ The PTB version is not ours to choose, and there is nothing newer to choose:
 
 - Harvested code imports about 40 names from Hermes core, some private, for example `gateway.run.cfg_get` and `tools.send_message_tool._send_telegram`. A Hermes upgrade can break them. The integration suite runs against the pinned commit, and an upgrade is a deliberate step: bump the pin, run the suite.
 - Sends outside the gateway process (`hermes send`, cron in a separate process) go through the bundled code by import path (`tools/send_message_senders.py:131,253`), not through this plugin. They keep the old formatting. Cron reports delivered by the live gateway use this plugin.
+- Installing the plugin without enabling it shadows the bundled plugin and leaves Telegram with no adapter (`checks/test_install.py`, `docs/install.md`). Deployment installs and enables in one step.
 
 ## Agent interface
 
@@ -177,14 +186,15 @@ Drafts exist only in private chats. Groups and channels keep the typing indicato
 ## Testing
 
 - Unit tests cover pure logic: Markdown splitting within Telegram's limits, payload builders, widget validation, button tokens.
-- Integration tests run the real Hermes at `c419cf7` and the real PTB 22.8, installed as development dependencies at those pins. The adapter is built through Hermes' own plugin loading. Telegram is replaced by a local HTTP server at the PTB base URL: it records every request, checks it against the documented limits, and plays scripted updates. There are no hand-written stand-ins for Hermes: six open findings of the Prism attempt are drift between its stand-ins and the real code (lumi-telegram issues #13, #15, #20, #30, #31, #46).
+- Integration tests run the real Hermes at `c419cf7` and the real PTB 22.8, installed as development dependencies at those pins. The adapter is built through Hermes' own plugin loading. There are no hand-written stand-ins for Hermes: six open findings of the Prism attempt are drift between its stand-ins and the real code (lumi-telegram issues #13, #15, #20, #30, #31, #46).
+- End-to-end checks reuse Hermes' own messaging-adapter contract (`tests/e2e/core/platforms/` at the pin). It starts a real `hermes gateway run` child with a fake model and Hermes' Bot API stand-in (`tests/fakes/platforms/telegram_standin.py`) behind the PTB base URL. `checks/e2e/` runs its scenarios unchanged against this plugin. The stand-in answers only the methods the bundled adapter calls and returns 404 for anything else. The slices that add methods (`sendRichMessage`, `sendRichMessageDraft`, `sendWidget`, `answerWidgetQuery`, `sendPoll`) extend it in a subclass in this repository, with each method checked against its documented limits.
 - Live acceptance is done by the owner on `vtadevbot`, with a checklist per slice. The bot token stays in 1Password and on the host, never in this repository or in a test.
 
 ## Slices
 
 Each slice is one PR to `main`, reviewed by the owner.
 
-0. Skeleton and parity. The plugin loads as `telegram` and shadows the bundled copy. Harvested transport, authorization, routing and Hermes' own button flows work. The integration harness exists. Checked by the current behaviour: text in and out, media in, approvals, clarify, cron delivery, the `family` route.
+0. Skeleton and parity. The plugin loads as `telegram` and shadows the bundled copy. Harvested transport, authorization, routing and Hermes' own button flows work. The integration harness exists. Checked by: harvested code equal to upstream member by member, the registration equal to the bundled one, Hermes' plugin discovery picking this plugin, and Hermes' Telegram contract suite against it. Clarify, cron delivery and the `family` route have no scenario in that suite. Their code is harvested unchanged, so they get end-to-end checks in the slices that change the paths they use (3 and 4).
 1. Rich answers: rows 1, 2, 16.
 2. Files: rows 3, 4, 5, 15, and the cause of today's failed sends.
 3. Lifecycle: rows 6 to 10, 17.
