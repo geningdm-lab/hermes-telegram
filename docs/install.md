@@ -8,7 +8,7 @@ The profile must load plugins in the gateway process, which is Hermes' default (
 
 ## Steps
 
-1. Copy the `hermes_telegram/` directory of a reviewed commit to `$HERMES_HOME/plugins/platforms/telegram/` of the profile that owns the Telegram bot. The directory name matters: `platforms/telegram` is the bundled plugin's key, and only a user plugin with the same key replaces it (`hermes_cli/plugins_discovery.py:222`). Copy it; do not link it.
+1. Copy the `hermes_telegram/` directory of a reviewed commit to `$HERMES_HOME/plugins/platforms/telegram/` of the profile that owns the Telegram bot. The directory name matters: `platforms/telegram` is the bundled plugin's key, and only a user plugin with the same key replaces it (`hermes_cli/plugins_discovery.py:222`). The directory may be a copy or a link to an immutable one, such as a Nix store path (`homelab/nix/hermes/telegram` links one); never link a working tree, which changes under the running gateway. The plugin keeps its state in the Hermes home, not in its directory, so a read-only copy works.
 2. Enable it in that profile's `config.yaml`:
 
    ```yaml
@@ -20,10 +20,10 @@ The profile must load plugins in the gateway process, which is Hermes' default (
 3. Restart the gateway and check Hermes' INFO log, `$HERMES_HOME/logs/gateway.log` (the console shows only warnings), for the line the plugin writes when it builds the adapter:
 
    ```text
-   hermes-telegram 0.1.0: Telegram adapter HermesTelegramAdapter from <HERMES_HOME>/plugins/platforms/telegram
+   hermes-telegram 0.1.0: Telegram adapter HermesTelegramAdapter from <the plugin's directory>
    ```
 
-   Only this line shows the plugin serves Telegram. Discovery's `shadows the bundled copy` line is written before the plugin is enabled or registered, and it also appears when Telegram ends up with no adapter.
+   For a link the line names the link's target. Only this line shows the plugin serves Telegram. Discovery's `shadows the bundled copy` line is written before the plugin is enabled or registered, and it also appears when Telegram ends up with no adapter.
 
 The plugin's Telegram configuration is the bundled one: the same `telegram:` keys, environment variables and `gateway.profile_routes` apply unchanged.
 
