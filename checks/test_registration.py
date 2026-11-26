@@ -168,6 +168,7 @@ def test_hint_allows_tables_and_keeps_the_bundled_media_instructions():
 def test_the_plugin_registers_its_agent_tools_in_the_telegram_toolset():
     ctx = _Ctx()
     register(ctx)
-    assert sorted(ctx.tools) == ["telegram_send", "telegram_status"]
+    assert sorted(ctx.tools) == ["telegram_poll", "telegram_react", "telegram_send", "telegram_status",
+                                 "telegram_sticker"]
     assert {t["toolset"] for t in ctx.tools.values()} == {"telegram"}
     assert all(t["is_async"] for t in ctx.tools.values())

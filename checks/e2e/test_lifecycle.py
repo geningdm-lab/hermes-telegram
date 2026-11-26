@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from checks.e2e.rig import C, rig_fixtures
+from checks.e2e.rig import C, rig_fixtures, tool_call
 from tests.fakes.fake_llm_provider import ToolCall
 from tests.fakes.platforms._standin import wait_until
 
@@ -68,13 +68,6 @@ def _distinct(values: list[str]) -> list[str]:
     return [v for i, v in enumerate(values) if i == 0 or v != values[i - 1]]
 
 
-def _tool(rig: Any, tag: str, name: str, args: dict[str, Any]) -> ToolCall:
-    """A call of a telegram tool as a real model makes it: directly, or through Hermes' tool search bridge."""
-    offered = C._offered_tools(rig, tag)
-    return (ToolCall(name, args) if name in offered
-            else ToolCall("tool_call", {"calls": [{"name": name, "arguments": args}]}))
-
-
 def test_the_gateway_asks_telegram_for_stop_presses(rig):
     # Telegram delivers only the update kinds a bot asks for; PTB 22.8's list predates the Stop button.
     polls = [c for c in rig.drv.standin.calls_of("getUpdates") if c.params.get("allowed_updates")]
@@ -86,8 +79,8 @@ def test_the_gateway_asks_telegram_for_stop_presses(rig):
 def test_the_preview_reads_contemplating_then_the_status_the_agent_set_last(rig):
     # Row 6.
     token, aid = "lc-status", "A-lc-status"
-    first = _tool(rig, "lcs1", "telegram_status", {"text": "Reading the report..."})
-    second = _tool(rig, "lcs2", "telegram_status", {"text": "Writing the summary..."})
+    first = tool_call(rig, "lcs1", "telegram_status", {"text": "Reading the report..."})
+    second = tool_call(rig, "lcs2", "telegram_status", {"text": "Writing the summary..."})
     rig.director.script(token, first, second, C.answer(aid, "summary done"))
     user = rig.fresh_user()
     chat = _Chat(rig, user)

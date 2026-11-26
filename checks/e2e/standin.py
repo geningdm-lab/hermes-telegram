@@ -83,6 +83,19 @@ class RichTelegramStandin(TelegramStandin):
             self.drafts[(str(p["chat_id"]), int(p["draft_id"]))] = text
         return True
 
+    def buttons(self, chat_id: Any) -> list[dict[str, Any]]:
+        """Hermes' ``buttons``, and the inline buttons of rich messages too (sendrichmessage.md, reply_markup)."""
+        out = super().buttons(chat_id)
+        for call in self.calls_of("sendRichMessage"):
+            if str(call.params.get("chat_id")) != str(chat_id) or call.faulted:
+                continue
+            markup = call.params.get("reply_markup") or {}
+            mid = (call.response or {}).get("message_id")
+            for row in (markup.get("inline_keyboard") or []) if isinstance(markup, dict) else []:
+                for btn in row:
+                    out.append({**btn, "message_id": mid})
+        return out
+
     def stop_generation(self, chat_id: Any, draft_id: int, thread_id: Any = None) -> dict[str, Any]:
         """The user presses Stop on the draft ``draft_id``."""
         stopped: dict[str, Any] = {"chat": self._chat(chat_id), "draft_id": int(draft_id)}
@@ -183,6 +196,67 @@ class MediaTelegramStandin(RichTelegramStandin):
 
     def _m_sendAnimation(self, p: dict[str, Any]) -> dict[str, Any]:
         return self._media(p, "animation", "animation", FILE_UPLOAD_MAX)
+
+    # Polls, reactions, stickers (slice 4): sendpoll.md, types/poll.md, pollanswer.md, messagereactionupdated.md,
+    # sendsticker.md, getstickerset.md.
+
+    def _m_sendPoll(self, p: dict[str, Any]) -> dict[str, Any]:
+        question = str(p.get("question") or "")
+        options = p.get("options")
+        if not 1 <= len(question) <= 300:
+            raise BotApiError("Bad Request: poll question must be 1-300 characters")
+        if not isinstance(options, list) or not 1 <= len(options) <= 12:
+            raise BotApiError("Bad Request: poll must have 1-12 options")
+        texts = [o.get("text") if isinstance(o, dict) else str(o) for o in options]
+        quiz = p.get("type") == "quiz"
+        if quiz and not p.get("correct_option_ids"):
+            raise BotApiError("Bad Request: correct_option_ids is required for quiz polls")
+        self._poll_ids = getattr(self, "_poll_ids", 0) + 1
+        poll = {"id": f"poll-{self._poll_ids}", "question": question, "total_voter_count": 0, "is_closed": False,
+                "is_anonymous": p.get("is_anonymous", True) not in (False, "false", "False"),
+                "type": "quiz" if quiz else "regular",
+                "allows_multiple_answers": bool(p.get("allows_multiple_answers")),
+                "allows_revoting": True, "members_only": False,  # required fields of types/poll.md
+                # persistent_id is required since Bot API 9.6 (PTB 22.8 refuses a poll without it)
+                "options": [{"text": t, "voter_count": 0, "persistent_id": f"opt-{i}"} for i, t in enumerate(texts)]}
+        if quiz:
+            poll["correct_option_ids"] = p["correct_option_ids"]
+        return self._bot_message(p, _kind="poll", poll=poll)
+
+    def poll_answer(self, user_id: int, poll_id: str, option_ids: list[int]) -> dict[str, Any]:
+        update = {"update_id": next(self._update_ids),
+                  "poll_answer": {"poll_id": poll_id, "user": self._user(user_id), "option_ids": option_ids,
+                                  "option_persistent_ids": [f"opt-{i}" for i in option_ids]}}
+        self._push(update)
+        return update
+
+    def react(self, user_id: int, chat_id: Any, message_id: int, emoji: str) -> dict[str, Any]:
+        """The user sets a reaction on a message."""
+        update = {"update_id": next(self._update_ids), "message_reaction": {
+            "chat": self._chat(chat_id), "message_id": int(message_id), "user": self._user(user_id),
+            "date": 0, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": emoji}]}}
+        self._push(update)
+        return update
+
+    sticker_sets: dict[str, list[dict[str, Any]]] = {}
+
+    def _sticker(self, file_id: str, emoji: str, set_name: str = "") -> dict[str, Any]:
+        return {"file_id": file_id, "file_unique_id": f"u-{file_id}", "type": "regular", "width": 512,
+                "height": 512, "is_animated": False, "is_video": False, "emoji": emoji,
+                **({"set_name": set_name} if set_name else {})}
+
+    def _m_getStickerSet(self, p: dict[str, Any]) -> dict[str, Any]:
+        name = str(p.get("name") or "")
+        if name not in self.sticker_sets:
+            raise BotApiError("Bad Request: STICKERSET_INVALID")
+        return {"name": name, "title": f"{name} title", "sticker_type": "regular",
+                "stickers": [self._sticker(s["file_id"], s["emoji"], name) for s in self.sticker_sets[name]]}
+
+    def _m_sendSticker(self, p: dict[str, Any]) -> dict[str, Any]:
+        sticker = p.get("sticker")
+        if not isinstance(sticker, str) or not sticker:
+            raise BotApiError("Bad Request: sticker must be a file_id")
+        return self._bot_message(p, _kind="sticker", sticker=self._sticker(sticker, ""))
 
     def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         media = p.get("media")

@@ -224,3 +224,50 @@ A long answer streaming past the rich limit:
 Not done: a rich final in parts for that mode. Under `edit`, Hermes streams by editing one message and finalizes it in place (`stream_consumer_transport.py:128`), so an answer over one rich message's limits ends as the harvested MarkdownV2 edit. That mode is a profile's explicit choice against Telegram's drafts, which this plugin builds on; the default (`auto`) uses drafts in every private chat. Making the edited path split into rich parts would mean replacing Hermes' edit-finalize logic in the stream consumer, not the adapter's.
 
 Reopen if a profile of the deployment sets `streaming.transport: edit` for Telegram.
+
+## Slice 4, PR #6
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:slice/3-lifecycle` (`87e855e`) at `330e95a`, 2026-11-25. Nineteen findings: eighteen accepted and fixed, one disputed in part. The tests named are in `checks/test_action_events.py` unless another file is given; each was checked against a mutation of its fix.
+
+### Accepted and fixed
+
+Who may act, and where it lands:
+
+| Finding | Fix |
+|---|---|
+| [P1] Taps, votes and reactions skip the text's admission | `_actor_admitted`: the adapter's `allow_from` when set, else the gateway's chain, failing closed, before any state changes; private chats only; `test_a_tap_by_a_user_the_adapter_does_not_admit_reaches_nobody_and_takes_nothing`, `test_a_tap_in_a_group_reaches_nobody`, `test_a_vote_by_a_user_the_adapter_does_not_admit_reaches_nobody`, `test_a_reaction_by_a_user_not_admitted_or_in_a_group_reaches_nobody` |
+| [P1] A failed acknowledgement consumes the choice undelivered | the acknowledgement is best effort; a hand-off that fails releases the claim; `test_a_tap_reaches_the_agent_even_when_telegram_refuses_its_acknowledgement`, `test_a_tap_whose_hand_off_fails_leaves_the_set_open` |
+| [P1] A token is not bound to the message that shows it | a set is bound to its message, topic and profile once sent (`ButtonStore.bind`), and a mismatch is "expired"; `test_a_token_presented_with_another_message_topic_or_chat_is_not_that_sets_tap` |
+| [P1] Tool sends fall back out of the topic | `TOOL_SEND` turns off the media retry without topic and the root-chat text retry for a tool's sends (`HumanTurnsMixin`); text goes through `send_single`, which has no fallback; `test_a_tools_poll_fails_rather_than_leave_the_turns_topic`, `test_a_tools_notice_fails_rather_than_leave_a_forum_topic` |
+| [P1] An explicit reaction target may be in another topic | only the current message or a bot message of the same chat and topic; `test_the_agent_reacts_only_in_its_own_conversation` |
+| [P1] Reactions lose their topic, and the index its content on restart | the bot's messages are kept with their topic in `telegram_bot_messages.json`; `test_a_reaction_in_a_topic_reaches_that_topic_after_a_restart` |
+| [P2] Action turns lack the topic's skill and prompt | `_action_event` resolves them as the text path does (`_resolve_topic_binding`, `resolve_channel_prompt`); `test_a_tap_is_routed_by_the_user_who_tapped_with_the_topics_skill_and_prompt` |
+
+Sending:
+
+| Finding | Fix |
+|---|---|
+| [P1] A long tool text can exceed the cap | the tool's text is one message (`send_single`); a longer one is refused unsent; `test_a_tool_text_longer_than_one_message_is_refused_unsent` |
+| [P1] Button sends skip the rich safety checks | `send_single` uses `_rich_eligible_any_length`, the answer path's check; `test_a_tool_message_with_buttons_is_rich_exactly_when_an_answer_would_be` |
+| [P2] Button sends ignore the notification policy | `send_single` applies `_notification_kwargs`; `test_a_tool_message_follows_the_notification_policy` |
+| [P2] An uncertain poll or sticker is reported as not sent | `_send_failed` marks a timeout after the request went out `ambiguous_delivery`; the tool keeps the slot and tells the agent not to send it again; `test_an_uncertain_poll_keeps_its_slot_and_says_not_to_send_it_again` |
+
+State:
+
+| Finding | Fix |
+|---|---|
+| [P2] Store write failures report success | `StoreError` from both stores; a set that cannot be saved is not sent, a claim that cannot be saved is not taken; `checks/test_buttons.py::test_a_store_that_cannot_save_publishes_and_takes_nothing` |
+| [P2] A vote before `sendPoll` returns is dropped | a vote for an unknown poll waits up to 5 s while a poll send is in flight; `test_a_vote_that_arrives_before_sendpoll_returns_reaches_the_agent` |
+| [P2] Quoted fields are not escaped | JSON strings (`quoted`); `checks/test_buttons.py::test_a_quote_inside_a_field_cannot_read_as_another_field` |
+| [P2] Processing reactions replace the agent's | `_set_reaction` leaves a message the agent reacted to alone; `test_hermes_processing_reactions_leave_the_agents_reaction` |
+| [P2] Partial deliveries and control prompts are not recorded | every delivered id of a partial send (`DELIVERED_IDS`, also where Hermes keeps only the tail) and `_send_control_message`; `test_every_part_of_a_partly_delivered_answer_is_a_bot_message`, `test_a_control_prompt_is_a_bot_message` |
+| [P2] A sticker set that failed once is gone until restart | read again a minute after a failure; `test_a_sticker_set_telegram_failed_to_return_is_asked_for_again_later` |
+| [P2] Negative end-to-end checks sleep instead of synchronizing | `checks/e2e/test_actions.py`: the second tap is checked behind a same-chat barrier, the own-message reaction behind a later reaction that does reach the agent |
+
+### Disputed in part
+
+**[P1] Partition action state by routed profile on a shared bot.** Accepted: every record carries the profile that made it, and every read checks it. A set sent by one profile takes no tap routed to another (`test_a_set_the_owner_sent_does_not_take_a_tap_routed_to_another_profile`), a vote counts only for the poll's profile, and the sticker catalog holds only what users of the caller's profile sent (`test_a_sticker_the_owner_sent_is_not_in_another_profiles_catalog`).
+
+Not done: separate files per profile home. The stores live in the adapter's home (`_update_receipt_dir`), next to the update receipts Hermes keeps there for the same bot (hermes-agent@c419cf7:plugins/platforms/telegram/adapter.py:595); one bot's state stays together, and the gateway process that owns the bot reads it either way. The configured sticker sets stay shared: they are public sets named in the adapter's own config.
+
+Reopen if profiles of one bot run under separate OS users, or a profile's records must not be readable by the gateway that serves the others.

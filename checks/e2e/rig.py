@@ -120,3 +120,13 @@ def rig_fixtures(driver_cls: type = PluginTelegramDriver) -> tuple[Any, Any]:
     """Hermes' module-scoped ``(rig, rig_stream)`` fixtures, building this plugin's gateway."""
     _suite.GatewayUnderTest = PluginGatewayUnderTest  # _suite builds its gateway through this name
     return _suite.rig_fixtures(driver_cls)
+
+
+def tool_call(rig: Any, tag: str, name: str, args: dict[str, Any]) -> Any:
+    """A call of one of this plugin's tools as a real model makes it: directly when the model is offered the
+    tool, else through Hermes' tool search bridge (``tool_call``), which defers plugin tools."""
+    from tests.fakes.fake_llm_provider import ToolCall
+
+    offered = C._offered_tools(rig, tag)
+    return (ToolCall(name, args) if name in offered
+            else ToolCall("tool_call", {"calls": [{"name": name, "arguments": args}]}))

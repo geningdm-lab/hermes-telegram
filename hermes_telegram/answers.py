@@ -22,6 +22,7 @@ from typing import Any, Optional
 from gateway.platforms.base import SendResult, utf16_len
 
 from . import rich
+from .delivery import DELIVERED_IDS
 from .harvested.adapter_module import (
     _flood_cap_result,
     _iter_exception_graph,
@@ -161,6 +162,14 @@ class RichAnswersMixin:
         return bool(self._looks_like_connect_timeout(exc) or self._looks_like_pool_timeout(exc) or any(
             "connecterror" in cur.__class__.__name__.lower() or "connecterror" in str(cur).lower()
             for cur in _iter_exception_graph(exc)))
+
+    def _send_failed(self, exc: Exception, error: str) -> SendResult:
+        """A failed single send, telling a certain refusal from one Telegram may have shown anyway
+        (``ambiguous_delivery``): the caller must not send that again."""
+        unsent = self._certainly_unsent(exc)
+        result = SendResult(success=False, error=error, retryable=unsent)
+        result.raw_response = {"ambiguous_delivery": not unsent and not self._is_bad_request_error(exc)}
+        return result
 
     def _rich_transient_result(self, exc: Exception, what: str, *, retry_after: Any = None) -> SendResult:
         """The harvested result, marked with whether the part certainly was not delivered.
@@ -323,6 +332,7 @@ class RichAnswersMixin:
         if not tail_certain:
             raw["ambiguous_delivery"] = True
         if delivered:
+            raw[DELIVERED_IDS] = tuple(delivered)
             raw.update({
                 "partial_overflow": True, "delivered_chunks": len(delivered),
                 "total_chunks": len(delivered) + len(items), "last_message_id": delivered[-1],
