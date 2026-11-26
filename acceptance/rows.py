@@ -616,19 +616,20 @@ async def row_14(run: Run) -> None:
 @row("17", "A cron report and an approval during a previewed turn",
      r17a=("Create a one-time cron job that runs 2 minutes from now and delivers exactly the text `R17 cron report` "
            "to this chat. Then reply `R17 scheduled`."),
-     r17b=("1. Run `rm -rf /tmp/hermes-acceptance-row-17` in the terminal.\n2. Run `sleep 90` in the terminal.\n"
-           "3. Reply `R17 done`."))
+     # Hermes' cron ticks every 3 minutes, so the report comes 2 to 5 minutes after r17a: r17b starts at once and
+     # its preview runs for 5 minutes.
+     r17b=("1. Run `rm -rf /tmp/hermes-acceptance-row-17` in the terminal.\n2. Run `sleep 150` in the terminal.\n"
+           "3. Run `sleep 150` in the terminal.\n4. Reply `R17 done`."))
 async def row_17(run: Run) -> None:
     scheduled = await run.send("r17a")
     await run.reply(scheduled.at, "R17 scheduled", quiet=2)
-    await run.pause("Wait about 30 s, then press Enter (the report is due 2 minutes after r17a).")
-    work = await run.send("r17b")
+    work = await run.send("r17b", "right away: the report is due while its preview runs")
     await run.rec.wait_for(lambda: next((m for _, m in messages(run.rec.sent(work.at)) if m.get("reply_markup")),
                                         None), timeout=120, what="the approval prompt")
     approval = next(m for _, m in messages(run.rec.sent(work.at)) if m.get("reply_markup"))
     await run.expect("callback_query", "on the approval prompt, tap the button that allows the command once.",
                      work.at)
-    sent = await run.reply(work.at, "R17 done", timeout=300, quiet=5)
+    sent = await run.reply(work.at, "R17 done", timeout=480, quiet=5)
     calls = run.rec.sent(scheduled.at)
     report = next((c for c, m in messages(calls) if "R17 cron report" in shown(m)), None)
     run.check("the cron report arrived in the chat", report is not None)
