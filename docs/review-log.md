@@ -175,3 +175,52 @@ Position: that resend is Hermes' recovery policy, and it is visible, not silent.
 Reopen if the owner prefers losing an answer whose delivery is unknown over a marked resend, or if the ledger starts resending without a marker.
 
 Owner decision, 2026-11-25: keep the marked resend (docs/design.md, Decisions and open questions, 6).
+
+## Slice 3, PR #5
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:a10a802` at `0507450`, 2026-11-25. Twenty-one findings: twenty accepted and fixed, one disputed in part. The slice 1 findings moved here are settled: the streamed overflow is fixed below; an edited final over the limits happens only where the stream edits messages (groups, and a private chat set to `streaming.transport: edit`, below).
+
+### Accepted and fixed
+
+Stop:
+
+| Finding | Fix |
+|---|---|
+| [P1] Stop matches the first turn of the chat, not its own draft | a press acts only on the turn whose preview showed that draft (`Preview.draft_ids`), in that chat and topic; a stale press is ignored; `checks/e2e/test_preview.py::test_stop_on_another_turns_draft_is_ignored` |
+| [P1] Stop skips the command's admission check | the presser is admitted again, now, before anything changes; `test_stop_from_a_user_no_longer_admitted_is_ignored` |
+| [P1] Stop sends again a segment already in the chat | the segments the stream sealed are left out of the preview and of the partial sent after Stop (`Preview.sealed`); `test_a_segment_already_in_the_chat_is_neither_shown_again_nor_sent_again_after_stop` |
+| [P2] A refused partial after Stop is lost | sent with Hermes' `_send_with_retry` (a certainly unsent send again, an ambiguous one not), and a failure is logged |
+| [P2] "Stopped" is deleted under `display.ephemeral_system_ttl` | the deletion is skipped for the Stop button's own dispatch; `checks/e2e/test_lifecycle_profile.py::test_stopped_stays_in_the_chat_when_hermes_deletes_its_system_replies` |
+| [P2] The Stop test times the acknowledgement, not the stop | a turn stopped during a tool never asks the model for its next step, and an approval works after it; `checks/e2e/test_lifecycle.py::test_stop_stops_the_work_itself_and_an_approval_works_after_it` |
+
+The preview:
+
+| Finding | Fix |
+|---|---|
+| [P1] An unadmitted sender gets "Contemplating..." and a Stop button | a preview starts only for a user the adapter admits (`_is_callback_user_authorized`, the gateway's own chain when it runs); `test_a_user_the_adapter_does_not_admit_gets_no_preview` |
+| [P1] Rich drafts bypass Telegram Desktop's crash guards | guarded shapes (maths in `<details>`, CJK) go as the plain frame; `test_maths_inside_details_goes_as_a_plain_frame` |
+| [P1] One topic finishing pauses another topic's preview | Hermes' pause is one flag per chat: it now marks a pause pending, which the next message to a topic turns into that topic's final; a stream still sending frames is not finalizing; `test_one_topic_finishing_does_not_stop_another_topics_preview` |
+| [P1] A frame in flight can land after the final | the final waits for any frame on its way, and no frame starts after it; `test_a_frame_in_flight_lands_before_the_final_and_none_after` |
+| [P1] A topic that refuses drafts gets success forever | a refused plain frame (short text, no markup) means drafts are refused here: `send_draft` reports it, so Hermes' stream falls back to edited messages; `test_a_topic_that_refuses_drafts_lets_the_stream_fall_back_to_edited_messages` |
+| [P2] Flood waits are ignored by frames | a flood refusal holds every frame of the preview until it passes, with no plain retry; `test_a_flood_wait_on_a_frame_holds_every_frame_until_it_passes` |
+| [P2] The cron check does not check the report arrives, nor after Stop | both: `test_a_cron_report_during_the_turn_arrives_and_the_preview_comes_back_under_it`, `test_after_stop_a_cron_report_arrives_and_no_preview_comes_back` |
+| [P2] The row 10 check filters a message the user sees | the check runs under the acceptance profile's setting (`display.suppress_warning_notifications`) and asserts the only message the chat shows says the answer failed; `test_lifecycle_profile.py::test_a_failed_turn_leaves_one_message_saying_the_answer_failed_and_no_preview` |
+| [P3] The refresh test replaces the production interval | `test_the_production_refresh_comes_before_telegram_lets_a_draft_expire` holds the production constants against the 30 s expiry |
+| [P3] The copied transport methods lack their upstream notice | `hermes_telegram/updates.py` names the upstream file, commit and MIT licence |
+
+A long answer streaming past the rich limit:
+
+| Finding | Fix |
+|---|---|
+| [P1] The live tail is prepared before the stream appends to it | the cut returns the agent's Markdown; `\[ ... \]` blocks are now no-cut zones of the cutter, as `$$` blocks are; `checks/e2e/test_stream_heads.py::test_the_live_tail_stays_as_the_agent_wrote_it` |
+| [P1] A head without structure of its own goes as MarkdownV2 chunks | a recognised head is a part of a rich answer whatever its own text; `test_a_sealed_head_without_structure_of_its_own_goes_as_one_rich_message` |
+| [P2] The cut ignores the consumer's UTF-16 units | the budget is scaled to them; `test_the_cut_counts_in_the_consumers_units` |
+| [P2] Head records outlive their stream | a record is used by the first send of that text, with or without `expect_edits`, and lapses after 120 s; `test_a_head_record_is_used_once`, `test_a_head_record_lapses` |
+
+### Disputed in part
+
+**[P2] Coordinate the preview with explicitly edit-based DM streaming.** Accepted: a private chat set to `streaming.transport: edit` no longer gets a draft on top of Hermes' edited messages. When the stream sends a message it will edit, the preview stops (`test_a_chat_streamed_by_editing_messages_gets_no_preview_on_top`).
+
+Not done: a rich final in parts for that mode. Under `edit`, Hermes streams by editing one message and finalizes it in place (`stream_consumer_transport.py:128`), so an answer over one rich message's limits ends as the harvested MarkdownV2 edit. That mode is a profile's explicit choice against Telegram's drafts, which this plugin builds on; the default (`auto`) uses drafts in every private chat. Making the edited path split into rich parts would mean replacing Hermes' edit-finalize logic in the stream consumer, not the adapter's.
+
+Reopen if a profile of the deployment sets `streaming.transport: edit` for Telegram.

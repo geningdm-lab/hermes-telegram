@@ -8,6 +8,8 @@ plugin changes goes into its own mixins, listed before the harvested ones so the
 - ``FilesMixin`` (slice 2): files as their kind or as documents; a file that does not arrive is named
   with the reason.
 - ``HumanTurnsMixin`` (slice 2): the human Telegram events being processed, which the agent's tools act for.
+- ``UpdateKindsMixin`` (slice 3): asks Telegram for the Bot API update kinds PTB 22.8 does not list.
+- ``PreviewMixin`` (slice 3): the preview of a turn in a private chat: status, partial answer, Stop.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
@@ -27,13 +29,17 @@ from .harvested.adapter_transport import TransportMixin
 from .harvested.telegram_held_inbound import TelegramHeldInboundMixin
 from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
 from .turn import HumanTurnsMixin
+from .preview import PreviewMixin
+from .updates import UpdateKindsMixin
 
 
 class HermesTelegramAdapter(
     # This plugin's behaviour.
+    PreviewMixin,
     RichAnswersMixin,
     FilesMixin,
     HumanTurnsMixin,
+    UpdateKindsMixin,
     # The bundled adapter's, harvested.
     CoreMixin,
     AccessMixin,

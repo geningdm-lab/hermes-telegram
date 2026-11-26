@@ -1,7 +1,7 @@
 """The agent's ``telegram`` toolset (docs/design.md, Agent interface, Tools).
 
-Slice 2 adds ``telegram_send`` for files; later slices add text, buttons, widgets, polls, reactions and
-stickers to the same toolset. Every tool acts in the turn's own chat through ``turn``, which carries the
+Slice 2 adds ``telegram_send`` for files and slice 3 ``telegram_status`` for the preview's status line; later
+slices add text, buttons, widgets, polls, reactions and stickers to the same toolset. Every tool acts in the turn's own chat through ``turn``, which carries the
 three guards of the design: no recipient argument, a turn started by the user's own Telegram message, a cap
 per turn.
 
@@ -202,6 +202,45 @@ async def telegram_send(args: dict[str, Any], **_: Any) -> str:
     return json.dumps(result)
 
 
+STATUS_SCHEMA: dict[str, Any] = {
+    "name": "telegram_status",
+    "description": (
+        "Set the status line of the preview the user sees in this Telegram chat while you work; it reads "
+        "\"Contemplating...\" until you set one, and shows the text you set last. Use a short phrase about what you "
+        "are doing now, such as \"Reading the report...\". It sends no message and does not count towards the "
+        "limit of extra messages."),
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 120,
+                                "description": "The status line, at most 120 characters."}},
+        "required": ["text"],
+    },
+}
+
+
+async def _set_status(adapter: Any, turn: Turn, text: str) -> dict[str, Any]:
+    adapter.admitted_turn(turn)
+    shown = await adapter.set_preview_status(turn.chat_id, turn.thread_id, text)
+    return {"status": text, "shown": shown,
+            **({} if shown else {"note": "This chat has no preview now (group chats have none)."})}
+
+
+async def telegram_status(args: dict[str, Any], **_: Any) -> str:
+    """Handler of ``telegram_status``."""
+    from tools.registry import tool_error
+
+    try:
+        turn = Turn.current()
+        text = args.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise TurnRefused("text must be a non-empty string.")
+        runner, adapter = live_adapter()
+        result = await on_gateway_loop(runner, lambda: _set_status(adapter, turn, text.strip()[:120]))
+    except TurnRefused as refused:
+        return tool_error(str(refused))
+    return json.dumps(result)
+
+
 def register_tools(ctx: Any) -> None:
     """Register the toolset's tools on the plugin context."""
     from tools.registry import no_cache_check_fn
@@ -209,3 +248,5 @@ def register_tools(ctx: Any) -> None:
     check = no_cache_check_fn(_available)
     ctx.register_tool(name="telegram_send", toolset=TOOLSET, schema=SEND_SCHEMA, handler=telegram_send,
                       check_fn=check, is_async=True, description=SEND_SCHEMA["description"], emoji="📎")
+    ctx.register_tool(name="telegram_status", toolset=TOOLSET, schema=STATUS_SCHEMA, handler=telegram_status,
+                      check_fn=check, is_async=True, description=STATUS_SCHEMA["description"], emoji="💭")

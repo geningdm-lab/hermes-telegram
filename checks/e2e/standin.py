@@ -11,6 +11,9 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
   (rich-messages.md, "Rich Message Limits"). The block count is Telegram's own and not modelled: a test
   that needs a refusal injects it with ``fail``.
 - ``editMessageText`` with ``rich_message`` instead of ``text`` (methods/editmessagetext.md).
+- ``sendRichMessageDraft`` (methods/sendrichmessagedraft.md): private chats only, a non-zero ``draft_id``,
+  an InputRichMessage; the latest frame per draft is kept in ``drafts``. ``stop_generation`` is the user
+  pressing Stop on a draft: the ``stopped_message_generation`` update (types/messagegenerationstopped.md).
 """
 
 import hashlib
@@ -69,6 +72,25 @@ class RichTelegramStandin(TelegramStandin):
             self._visible[(str(p["chat_id"]), mid)] = Visible(mid, text, extra={"kind": "rich"})
         msg["rich_message"] = {"blocks": []}  # a RichMessage, as types/richmessage.md shapes it
         return msg
+
+    def _m_sendRichMessageDraft(self, p: dict[str, Any]) -> bool:
+        if int(p.get("chat_id") or 0) <= 0:
+            raise BotApiError("Bad Request: drafts can be sent only to private chats")
+        if not int(p.get("draft_id") or 0):
+            raise BotApiError("Bad Request: draft_id must be non-zero")
+        text = _check_rich(p)
+        with self._lock:
+            self.drafts[(str(p["chat_id"]), int(p["draft_id"]))] = text
+        return True
+
+    def stop_generation(self, chat_id: Any, draft_id: int, thread_id: Any = None) -> dict[str, Any]:
+        """The user presses Stop on the draft ``draft_id``."""
+        stopped: dict[str, Any] = {"chat": self._chat(chat_id), "draft_id": int(draft_id)}
+        if thread_id:
+            stopped["message_thread_id"] = int(thread_id)
+        update = {"update_id": next(self._update_ids), "stopped_message_generation": stopped}
+        self._push(update)
+        return update
 
     def _m_editMessageText(self, p: dict[str, Any]) -> dict[str, Any]:
         if "rich_message" not in p:
