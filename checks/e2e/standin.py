@@ -17,6 +17,7 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
 """
 
 import hashlib
+import json
 import re
 import zlib
 from typing import Any
@@ -314,6 +315,67 @@ class MediaTelegramStandin(RichTelegramStandin):
             "message_id": int(message_id), "chat_instance": "ci-1", "type": {"type": "data"}, "data": data}}
         self._push(update)
         return update
+
+    # Slice 6: pinchatmessage.md, unpinchatmessage.md, and replies with a quote (types/replyparameters.md: the
+    # quote must be an exact part of the message replied to) and an effect (private chats only).
+
+    def _m_pinChatMessage(self, p: dict[str, Any]) -> bool:
+        self._known_message(p)
+        self.pinned.add((str(p["chat_id"]), str(p["message_id"])))
+        return True
+
+    def _m_unpinChatMessage(self, p: dict[str, Any]) -> bool:
+        self.pinned.discard((str(p["chat_id"]), str(p.get("message_id"))))
+        return True
+
+    @property
+    def pinned(self) -> set:
+        return self.__dict__.setdefault("_pinned", set())
+
+    def _known_message(self, p: dict[str, Any]) -> None:
+        key = (str(p["chat_id"]), str(p["message_id"]))
+        with self._lock:
+            known = key in self._visible or key in self.__dict__.get("_inbound_texts", {})
+        if not known:
+            raise BotApiError("Bad Request: message to pin not found")
+
+    def _inbound(self, chat: dict[str, Any], user_id: int, **fields: Any) -> dict[str, Any]:
+        update = super()._inbound(chat, user_id, **fields)
+        message = update["message"]
+        self.__dict__.setdefault("_inbound_texts", {})[(str(chat["id"]), str(message["message_id"]))] = (
+            message.get("text") or message.get("caption") or "")
+        return update
+
+    def _check_reply(self, p: dict[str, Any]) -> None:
+        reply = p.get("reply_parameters") or {}
+        if isinstance(reply, str):
+            reply = json.loads(reply)
+        if p.get("message_effect_id") and int(p.get("chat_id") or 0) <= 0:
+            raise BotApiError("Bad Request: message effects are available only in private chats")
+        quote = reply.get("quote")
+        if not quote:
+            return
+        key = (str(p["chat_id"]), str(reply.get("message_id")))
+        with self._lock:
+            vis = self._visible.get(key)
+            text = vis.text if vis is not None else self.__dict__.get("_inbound_texts", {}).get(key)
+        if text is None or quote not in text:
+            raise BotApiError("Bad Request: QUOTE_TEXT_INVALID")
+
+    def _m_sendMessage(self, p: dict[str, Any]) -> dict[str, Any]:
+        self._check_reply(p)
+        return self._with_effect(p, super()._m_sendMessage(p))
+
+    def _m_sendRichMessage(self, p: dict[str, Any]) -> dict[str, Any]:
+        self._check_reply(p)
+        return self._with_effect(p, super()._m_sendRichMessage(p))
+
+    @staticmethod
+    def _with_effect(p: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any]:
+        """types/message.md: the sent Message carries the effect it was sent with (``effect_id``)."""
+        if p.get("message_effect_id"):
+            msg["effect_id"] = str(p["message_effect_id"])
+        return msg
 
     def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         media = p.get("media")

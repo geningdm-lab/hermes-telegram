@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from telegram.error import BadRequest, TimedOut
 
-from checks.fake_bot import KID, OWNER, STRANGER, build_adapter, user
+from checks.fake_bot import KID, OWNER, STRANGER, build_adapter, message as _message, tap as _tap, user
 from gateway.platforms.base import MessageEvent, SendResult, _thread_metadata_for_event
 from hermes_telegram import tools
 from hermes_telegram.adapter import HermesTelegramAdapter
@@ -22,32 +22,6 @@ from hermes_telegram.turn import AdmittedTurn, Turn, TurnRefused, as_tool_send
 @pytest.fixture
 def adapter(tmp_path) -> HermesTelegramAdapter:
     return build_adapter(tmp_path)
-
-
-def _message(chat_id: str, message_id: Any, thread_id: Any = None, chat_type: str = "private") -> Any:
-    return SimpleNamespace(message_id=int(message_id), chat_id=int(chat_id),
-                           chat=SimpleNamespace(id=int(chat_id), type=chat_type),
-                           message_thread_id=int(thread_id) if thread_id else None,
-                           is_topic_message=bool(thread_id))
-
-
-class Query(SimpleNamespace):
-    """A tap; ``answer`` is Telegram's acknowledgement, which can fail."""
-
-    async def answer(self, text: str | None = None) -> None:
-        self.answers.append(text)
-        if self.answer_fails:
-            raise TimedOut("query is too old")
-
-
-_queries = iter(range(1, 10_000))
-
-
-async def _tap(adapter, user_id: str, message: Any, token: str, *, answer_fails: bool = False) -> Query:
-    query = Query(id=str(next(_queries)), data=PREFIX + token, from_user=user(user_id), message=message,
-                  answers=[], answer_fails=answer_fails)
-    await adapter._handle_callback_query(SimpleNamespace(callback_query=query), None)
-    return query
 
 
 def _offer(adapter, chat_id: str, message_id: Any, labels: list[str], *, thread_id: Any = None,

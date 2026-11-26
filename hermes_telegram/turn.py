@@ -92,6 +92,10 @@ class AdmittedTurn:
     metadata: dict[str, Any]
     limit: int = MAX_SENDS_PER_TURN
     sent: int = field(default=0)
+    # The user's message as Telegram delivered it (text or caption, and its entities as Bot API dicts), for a
+    # quote of it; None for a tap, vote, reaction or widget request, which has no text of its own.
+    text: str | None = None
+    entities: list[dict[str, Any]] = field(default_factory=list)
 
     def take(self, count: int) -> None:
         """Reserve ``count`` sends or refuse without reserving any. Runs on the gateway loop only."""
@@ -130,9 +134,14 @@ class HumanTurnsMixin:
         from gateway.platforms.base import _thread_metadata_for_event
 
         turns = self._human_turns()
+        raw = getattr(event, "raw_message", None)
+        text = (getattr(raw, "text", None) or getattr(raw, "caption", None)) if raw is not None else None
+        entities = (getattr(raw, "entities", None) or getattr(raw, "caption_entities", None) or ()) if text else ()
         turns[_event_key(source.chat_id, message_id)] = AdmittedTurn(
             chat_id=str(source.chat_id), thread_id=str(source.thread_id) if source.thread_id else None,
-            message_id=str(message_id), metadata=dict(_thread_metadata_for_event(event) or {}))
+            message_id=str(message_id), metadata=dict(_thread_metadata_for_event(event) or {}),
+            text=text if isinstance(text, str) else None,
+            entities=[e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in entities])
         while len(turns) > _TURN_MEMORY:
             turns.popitem(last=False)
 
