@@ -40,6 +40,8 @@ def plain(rich: Any) -> str:
         return str(rich.get("expression", ""))
     if rich.get("type") == "table":
         return "\n".join("\t".join(plain(c.get("text")) for c in row) for row in rich.get("cells") or ())
+    if "label" in rich and isinstance(rich.get("blocks"), list):  # a list item: its bullet or number, then it
+        return f"{rich['label']} " + "\n".join(p for p in (plain(b) for b in rich["blocks"]) if p)
     parts = []
     for key, value in rich.items():
         if key in _NOT_TEXT:
@@ -57,7 +59,7 @@ def nodes(message: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
-            if "type" in value:
+            if "type" in value and "label" not in value:  # a list item's type is its numbering style
                 out.append(value)
             for child in value.values():
                 walk(child)

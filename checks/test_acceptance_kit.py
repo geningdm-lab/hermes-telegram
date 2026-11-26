@@ -89,10 +89,13 @@ def test_the_readers_see_a_rich_message_as_the_owner_reads_it() -> None:
     message = _rich({"type": "heading", "size": 1, "text": "Heading one"},
                     {"type": "paragraph", "text": ["Plain, ", {"type": "bold", "text": "bold"}, " and a ",
                                                    {"type": "url", "text": "link", "url": "https://x.example"}]},
-                    {"type": "mathematical_expression", "expression": rows.FORMULA}, table)
+                    {"type": "mathematical_expression", "expression": rows.FORMULA}, table,
+                    {"type": "list", "items": [{"label": "1.", "type": "1", "value": 1,
+                                                "blocks": [{"type": "paragraph", "text": "one"}]}]})
     text = shown(message)
     assert "Heading one" in text and "Plain, bold and a link" in text and rows.FORMULA in text
-    assert "x.example" not in text and not rows._LITERAL.search(text)
+    assert "x.example" not in text and not rows._LITERAL.search(text) and "\n1. one" in text
+    assert [n["type"] for n in of_type(message, "1")] == []  # a list item is not a block
     assert rows._LITERAL.search("Plain, **bold**")
     (found,) = of_type(message, "table")
     assert table_cells(found) == rows.TABLE_ROWS
@@ -116,7 +119,13 @@ def test_every_code_a_row_asks_for_is_in_the_playbook_and_the_playbook_fits_soul
     asked |= {code for code in re.findall(r'\(\("(r\w+)", ', source)}  # row 4's loop over its codes
     asked |= set(re.findall(r'\("(r1l?)", "(?:short|long)"\)', source))
     assert asked and asked <= set(rows.PLAYBOOK), asked - set(rows.PLAYBOOK)
-    text = rows.playbook({n: Path(f"/samples/{n}") for n in _SAMPLE_NAMES})
+    # Each marker a row waits for is one the playbook tells the agent to write (row 4 once waited for "R4A done").
+    awaited = set(re.findall(r'run\.reply\([^,]+, "([^"]+)"', source)) | {done for done, _, _ in rows._ALBUMS.values()}
+    steps = rows.playbook({n: Path(n) for n in _SAMPLE_NAMES})
+    assert awaited and all(marker in steps for marker in awaited), [m for m in awaited if m not in steps]
+    from acceptance.samples import SAMPLES
+
+    text = rows.playbook({n: SAMPLES / f"acceptance-{n}.png" for n in _SAMPLE_NAMES})  # paths as long as the real
     assert len(text) < 20_000  # Hermes truncates a SOUL.md beyond CONTEXT_FILE_MAX_CHARS (agent/prompt_builder.py)
 
 
@@ -133,3 +142,35 @@ def test_the_report_names_each_failed_check_and_the_owners_no() -> None:
     report = _report([ok, bad], 0.0, argparse.Namespace(bot="vtadevbot", provider="anthropic", model="m"), "rec.jsonl")
     assert "| 2 | A table | pass |" in report and "| 11 | A choice | FAIL |" in report
     assert "- FAIL: one incoming choice (['a', 'b'])" in report and "- owner NO: notice?" in report
+
+
+def test_the_long_sample_of_row_1_is_longer_than_one_message() -> None:
+    from hermes_telegram.rich import split_markdown
+
+    # Six parts fit in one rich message, so the first live run's "several messages" could not pass.
+    assert len(split_markdown(rows.LONG)) > 1
+
+
+def test_a_run_empties_only_a_home_the_kit_made(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    from acceptance import home
+
+    foreign = tmp_path / "someone-else"
+    foreign.mkdir()
+    (foreign / "config.yaml").write_text("theirs")
+    monkeypatch.setattr(home, "HOME", foreign)
+    with pytest.raises(SystemExit):
+        home._fresh_home()
+    assert (foreign / "config.yaml").read_text() == "theirs"
+
+    ours = tmp_path / "ours"
+    monkeypatch.setattr(home, "HOME", ours)
+    home._fresh_home()
+    (ours / "skills" / "devops").mkdir(parents=True)
+    (ours / "state.db").write_text("x")
+    (ours / "logs").mkdir()
+    (ours / "logs" / "gateway.log").write_text("kept")
+    home._fresh_home()
+    assert sorted(p.name for p in ours.iterdir()) == [home._MARK, "logs"]
+    assert (ours / "logs" / "gateway.log").read_text() == "kept"

@@ -52,6 +52,22 @@ def bundled_locales() -> Path:
     return HERMES_SRC / "locales"
 
 
+_MARK = ".hermes-telegram-acceptance"
+
+
+def _fresh_home() -> None:
+    """An empty home for each run, so no session, skill, memory or cron job of an earlier run reaches the agent
+    (a session keeps the SOUL.md it started with). The logs stay. Only a home this kit made is emptied."""
+    if HOME.exists() and any(HOME.iterdir()) and not (HOME / _MARK).exists():
+        raise SystemExit(f"{HOME} is not an acceptance home this kit made; set HERMES_TELEGRAM_ACCEPTANCE_DIR to an "
+                         "empty or new directory.")
+    for child in HOME.iterdir() if HOME.exists() else ():
+        if child.name not in ("logs", _MARK):
+            shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+    HOME.mkdir(parents=True, exist_ok=True)
+    (HOME / _MARK).touch()
+
+
 def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str) -> Path:
     """The acceptance profile's home, with this working tree's plugin installed as docs/install.md says, the
     bot's calls going through the proxy at ``api``, and the rows' playbook as the agent's SOUL.md."""
@@ -59,9 +75,8 @@ def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str
     if sdk and importlib.util.find_spec(sdk) is None:
         raise SystemExit(f"The {provider} provider needs the {sdk} package in this environment: "
                          "run `mise exec -- uv sync --all-groups`.")
-    HOME.mkdir(parents=True, exist_ok=True)
+    _fresh_home()
     plugin = HOME / "plugins" / "platforms" / "telegram"
-    shutil.rmtree(plugin, ignore_errors=True)
     shutil.copytree(REPO / "hermes_telegram", plugin, ignore=shutil.ignore_patterns("__pycache__"))
     config = {
         "model": {"provider": provider, "default": model},
@@ -73,6 +88,10 @@ def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str
         # Row 17: a dangerous command waits for the owner's tap.
         "approvals": {"mode": "manual"},
         "updates": {"check": False},
+        # The agent follows the playbook only: Hermes' background review would write skills and memories
+        # (it wrote a skill of the playbook in the first run) that change how later rows are answered.
+        "skills": {"creation_nudge_interval": 0},
+        "memory": {"nudge_interval": 0},
     }
     with open(HOME / "config.yaml", "w", encoding="utf-8") as out:
         YAML().dump(config, out)

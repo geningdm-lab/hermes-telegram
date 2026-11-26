@@ -178,14 +178,20 @@ print("block code")
 ```
 
 $${FORMULA}$$"""
-LONG = "\n\n".join(f"## Part {n} of 6\n\n{SAMPLE}" for n in range(1, 7))
+# Longer than one rich message: Telegram takes 500 blocks in one (list items and nested blocks count), and
+# a part is about 20; six parts fit in one message.
+LONG_PARTS = 30
+LONG = "\n\n".join(f"## Part {n} of {LONG_PARTS}\n\n{SAMPLE}" for n in range(1, LONG_PARTS + 1))
 _LITERAL = re.compile(r"\*\*|__|~~|^#{1,6} |^\s*\||<u>|\$\$", re.MULTILINE)
 _ELEMENTS = ("headings, bold, italic, underline, strikethrough, nested emphasis, both lists, the quote, the link, "
              "inline and block code, the formula")
 
 
 @row("1", "Every formatting element, short and longer than one message",
-     r1=_exact(SAMPLE, "R1 short done"), r1l=_exact(LONG, "R1 long done"))
+     r1=_exact(SAMPLE, "R1 short done"),
+     r1l=(f"Reply with the Markdown of r1 (between its BEGIN and END) {LONG_PARTS} times, unchanged and complete each "
+          f"time, each copy under its own line `## Part <n> of {LONG_PARTS}` with n from 1 to {LONG_PARTS}, a blank "
+          "line between the copies, then a last line `R1 long done`."))
 async def row_1(run: Run) -> None:
     for code, size in (("r1", "short"), ("r1l", "long")):
         asked = await run.send(code)
@@ -197,9 +203,9 @@ async def row_1(run: Run) -> None:
         run.check(f"{size}: a formula whose LaTeX source is the agent's, character for character",
                   maths and all(FORMULA in s for s in maths), maths[:2])
         if size == "long":
-            order = [int(n) for n in re.findall(r"Part (\d) of 6", text)]
-            run.check("long: several messages, all six parts, in order",
-                      len(sent) > 1 and order == list(range(1, 7)), f"{len(sent)} messages, parts {order}")
+            order = [int(n) for n in re.findall(rf"Part (\d+) of {LONG_PARTS}", text)]
+            run.check(f"long: several messages, all {LONG_PARTS} parts, in order",
+                      len(sent) > 1 and order == list(range(1, LONG_PARTS + 1)), f"{len(sent)} messages, parts {order}")
         await run.compare(asked.at, f"Row 1, {size} answer: is every element formatted ({_ELEMENTS}), with no "
                                     "literal markup? Take the screenshots.")
 
@@ -275,13 +281,17 @@ def _albums(run: Run, since: float) -> list[Call]:
     return [c for c in run.rec.sent(since, {"sendMediaGroup"}) if c.ok]
 
 
+# code: (the marker the agent ends with, the photos, the albums Telegram should show)
+_ALBUMS = {"r4a": ("R4a done", 3, [list(range(1, 4))]), "r4b": ("R4b done", 12, [list(range(1, 11)), [11, 12]])}
+
+
 @row("4", "2 to 10 photos are one album; 12 are albums of 10 and 2, in order",
-     r4a=_files([f"photo-{n:02d}" for n in range(1, 4)], "R4a done"),
-     r4b=_files([f"photo-{n:02d}" for n in range(1, 13)], "R4b done"))
+     **{code: _files([f"photo-{n:02d}" for n in range(1, count + 1)], done)
+        for code, (done, count, _) in _ALBUMS.items()})
 async def row_4(run: Run) -> None:
-    for code, count, expected in (("r4a", 3, [list(range(1, 4))]), ("r4b", 12, [list(range(1, 11)), [11, 12]])):
+    for code, (done, count, expected) in _ALBUMS.items():
         asked = await run.send(code)
-        await run.reply(asked.at, f"{code.upper()} done", quiet=8)
+        await run.reply(asked.at, done, quiet=8)
         albums = _albums(run, asked.at)
         order = [[run.named(u["sha256"]) for u in uploads(c)] for c in albums]
         want = [[f"photo-{n:02d}" for n in group] for group in expected]
