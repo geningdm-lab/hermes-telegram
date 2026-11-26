@@ -2,13 +2,14 @@
 
 It is composed from the bundled adapter's methods, harvested into one mixin per concern
 (``harvested/adapter_*.py``), on the same bases the bundled ``TelegramAdapter`` had. Behaviour that this
-plugin changes goes into classes listed before the harvested mixins, so it overrides them.
+plugin changes goes into its own mixins, listed before the harvested ones so they override them:
 
-Slice 0 adds no behaviour of its own: the composed class behaves as the bundled adapter does.
+- ``RichAnswersMixin`` (slice 1): answers as Telegram rich messages, long ones cut into several.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
 
+from .answers import RichAnswersMixin
 from .harvested.adapter_access import AccessMixin
 from .harvested.adapter_core import CoreMixin
 from .harvested.adapter_events import EventsMixin
@@ -24,6 +25,9 @@ from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
 
 
 class HermesTelegramAdapter(
+    # This plugin's behaviour.
+    RichAnswersMixin,
+    # The bundled adapter's, harvested.
     CoreMixin,
     AccessMixin,
     TopicsMixin,
@@ -39,4 +43,4 @@ class HermesTelegramAdapter(
     TelegramTopicRoutingMixin,
     BasePlatformAdapter,
 ):
-    """Telegram bot adapter: the bundled adapter's behaviour, as the base this plugin builds on."""
+    """Telegram bot adapter: the bundled adapter's transport and routing, with this plugin's answers."""

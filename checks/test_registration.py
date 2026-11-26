@@ -31,6 +31,7 @@ OWN = {
     "adapter_factory": "builds HermesTelegramAdapter (checked below)",
     "ensure_deps_fn": "also copies rebound SDK names into the harvested modules (checked below)",
     "check_fn": "answers without importing the SDK until the adapter module is loaded (checked below)",
+    "platform_hint": "describes rich answers instead of forbidding tables (slice 1, checked below)",
 }
 
 
@@ -149,3 +150,12 @@ def test_plugin_discovery_and_config_load_import_neither_the_sdk_nor_the_adapter
     out = subprocess.run([sys.executable, "-I", "-c", probe], env=env, cwd=home, capture_output=True, text=True,
                          timeout=120, check=True)
     assert json.loads(out.stdout.strip().splitlines()[-1]) == []
+
+
+def test_hint_allows_tables_and_keeps_the_bundled_media_instructions():
+    # The bundled hint says "no tables", which would keep row 2's table from ever being written.
+    hint = _registered(register)["platform_hint"]
+    bundled = _registered(upstream_adapter.register)["platform_hint"]
+    assert "no tables" in bundled and "no tables" not in hint
+    media = bundled[bundled.index("You can send files natively"):]
+    assert hint.endswith(media)

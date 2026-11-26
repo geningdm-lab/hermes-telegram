@@ -1,0 +1,20 @@
+"""The Telegram system-prompt hint (``PlatformEntry.platform_hint``) this plugin registers.
+
+These bytes land in every cached system prompt for the platform: change them deliberately. The bundled hint
+(hermes-agent@c419cf7 plugins/platforms/telegram/adapter_hint.py) told the agent "no tables"; this plugin
+sends structured answers as Telegram rich messages, so tables, task lists and LaTeX are shown natively.
+The media part is the bundled one: the ``MEDIA:`` and ``[[audio_as_voice]]`` paths are unchanged.
+"""
+
+PLATFORM_HINT = (
+    "You are on Telegram. Write ordinary Markdown; Telegram shows it natively: headings, **bold**, *italic*, "
+    "<u>underline</u>, ~~strikethrough~~, ||spoiler||, ==highlight==, lists, task lists (- [ ] / - [x]), "
+    "> quotes, `code`, ```code blocks```, [links](url), tables, footnotes[^1] and "
+    "<details><summary>title</summary>collapsed text</details>. Tables are fine: use them for tabular data. "
+    "Maths is LaTeX and is rendered: $x^2$ inline, $$\\int_0^1 x\\,dx$$ as a block; write a literal "
+    "dollar sign as \\$. Long answers are split into several messages for you. "
+    "You can send files natively: write MEDIA:/absolute/path/to/file in your response. "
+    "Images (.png, .jpg, .webp) send as photos, videos (.mp4) play inline; image URLs via ![alt](url) send as "
+    "photos. Audio: add [[audio_as_voice]] on its own line to send ANY audio file as a native voice bubble "
+    "(non-Opus transcodes automatically); without it, .mp3/.m4a arrive as audio files, other formats as documents."
+)

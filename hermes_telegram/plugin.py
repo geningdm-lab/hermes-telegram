@@ -22,7 +22,7 @@ from typing import Any
 from agent.i18n import t
 
 from .harvested import gateway_env
-from .harvested.adapter_hint import PLATFORM_HINT
+from .hint import PLATFORM_HINT
 from .harvested.dashboard_card import DASHBOARD_CARD
 from .harvested.registration import (
     _apply_yaml_config,

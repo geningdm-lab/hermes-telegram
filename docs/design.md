@@ -128,6 +128,17 @@ The agent keeps writing ordinary Markdown. The adapter chooses the form:
 - `MEDIA:` lines and `[[audio_as_voice]]` keep working, because other tools and skills emit them.
 - The prompt hint is rewritten: tables, task lists and the tools below are allowed and described.
 
+How slice 1 does it (`hermes_telegram/rich.py`, `hermes_telegram/answers.py`):
+
+- It overrides the predicates and payload of the harvested rich path, and sends every rich answer through its own sender, `_send_items`. The harvested path keeps reply anchors (`reply_parameters`), topics, flood pacing and its MarkdownV2 fallback. Rich is on unless a profile sets `rich_messages: false`; the bundled default was off.
+- "Structure" means headings, lists, task lists, quotes, tables, code, links, footnotes, rules, maths, highlights and the allowed HTML tags. Emphasis alone stays an ordinary message, which already shows bold, italic, strikethrough and spoilers.
+- The answer is prepared once, then cut. Preparation works outside code (fences, code spans, `<code>`, `<pre>`, and a top-level block indented four spaces after a blank line) and outside maths. `\(...\)` and `\[...\]` become `$...$` and `$$...$$`. A `$` that opens no maths becomes `\$`: the rule is Pandoc's, made stricter so that the first `$` after an opening one must close it, which means "$5 and $10" stays two prices. A `<` that starts none of the allowed tags (`<u>`, `<details>`, `<tg-spoiler>` and the like) or an autolink becomes `\<`. A line break inside a paragraph becomes a hard break. Code and formula source arrive exactly as written. `<tg-button>` is not allowed in text, because buttons come from the tools, which own their callback data. On the ordinary MarkdownV2 path, the hint's `\$` is turned back into `$` outside code, and a part that falls back to MarkdownV2 loses the escapes preparation added.
+- The cut keeps fenced code (closing and reopening it if it must cut inside), table headers (repeated), maths and details blocks, list items and footnote definitions (copied to the part that references them). It works within 32000 characters and an estimated 400 blocks; Telegram does not publish its block count.
+- A part Telegram refuses was not delivered. It is cut in half and resent, twice at most, then sent as MarkdownV2 chunks rather than lost. Once the rich endpoint is gone (the capability latch), the remaining parts go as MarkdownV2.
+- A failure after some parts landed returns Hermes' `partial_overflow` result. The unsent parts are kept for resuming only when the failed part was certainly not sent: a flood wait (which also arms the chat's cooldown), a connection that never opened, or no free pooled connection (PTB says such a request was not sent). A part that may have been shown (a timeout, a connection lost after the request went out) is never sent again: the result is marked `ambiguous_delivery`, and `_send_retry_is_final` stops the base retry from resending the whole answer or its plain-text fallback. A flood wait PTB gives as a `timedelta` is counted in seconds. After a chunk had to leave a forum topic Telegram no longer has, the rich parts after it leave the topic too.
+- Streamed answers still take the harvested path when the gateway edits a preview into the final answer, or seals heads of a long answer while it streams. Slice 3 owns those (docs/review-log.md, slice 1).
+- The bundled guards for Telegram Desktop stay. Text with CJK characters, and maths inside `<details>`, still take the MarkdownV2 path (tdesktop#30808, Hermes #47653). This plugin does not prove those client bugs; it keeps the bundled behaviour.
+
 ### Tools
 
 Toolset `telegram`. Every tool acts on the chat and topic of the turn that calls it, read from the turn's session context (`gateway/session_context.py:131`); none takes a chat id. A profile gets them only if its toolsets include `telegram`; the `family` profile lists its toolsets explicitly, so it gets none until the owner adds it.
@@ -197,7 +208,7 @@ Each slice is one PR to `main`, reviewed by the owner.
 0. Skeleton and parity. The plugin loads as `telegram` and shadows the bundled copy. Harvested transport, authorization, routing and Hermes' own button flows work. The integration harness exists. Checked by: harvested code equal to upstream member by member, the registration equal to the bundled one, Hermes' plugin discovery picking this plugin, and Hermes' Telegram contract suite against it. Clarify, cron delivery and the `family` route have no scenario in that suite. Their code is harvested unchanged, so they get end-to-end checks in the slices that change the paths they use (3 and 4).
 1. Rich answers: rows 1, 2, 16.
 2. Files: rows 3, 4, 5, 15, and the cause of today's failed sends.
-3. Lifecycle: rows 6 to 10, 17.
+3. Lifecycle: rows 6 to 10, 17, and streamed answers as rich messages: block-aware heads while a long answer streams, and a rich final in parts where the gateway edits a preview.
 4. Buttons, polls, reactions, stickers and their events: row 11.
 5. Widgets: rows 12 to 14.
 6. The rest of the agent surface: effects, pins, edits, link previews, quote replies.
