@@ -128,8 +128,8 @@ def test_pin_is_one_commit_everywhere():
     origin = importlib.metadata.distribution("hermes-agent").read_text("direct_url.json") or ""
     assert PIN in origin
     dev = tomllib.loads((ROOT / "pyproject.toml").read_text())["dependency-groups"]["dev"]
-    assert [d for d in dev if d.startswith("hermes-agent")] == [
-        f"hermes-agent[telegram] @ git+https://github.com/NousResearch/hermes-agent.git@{PIN}"]
+    (hermes,) = [d for d in dev if d.startswith("hermes-agent")]  # its extras are the environment's, not the pin
+    assert hermes.endswith(f" @ git+https://github.com/NousResearch/hermes-agent.git@{PIN}"), hermes
 
 
 def test_composition_keeps_the_bundled_bases_in_order():
