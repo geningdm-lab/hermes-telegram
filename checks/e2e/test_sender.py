@@ -9,92 +9,16 @@ Regressions from the Codex review of slice 1 (docs/review-log.md).
 
 import itertools
 import re
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable
 
-import httpx
 import pytest
 
-import checks.e2e.rig  # noqa: F401  (puts the pinned Hermes source, and with it the stand-in, on sys.path)
-from checks.e2e.standin import RichTelegramStandin
-from gateway.config import PlatformConfig
-from hermes_telegram.adapter import HermesTelegramAdapter
+from checks.e2e.wire import CHAT, sender_fixture  # noqa: F401  (the sender fixture)
 
 pytestmark = pytest.mark.e2e
 
-CHAT = "111"  # a private chat
 GROUP = "-100123"  # a forum supergroup
 TOPIC = "77"
-
-
-class Wire(httpx.AsyncBaseTransport):
-    """httpx's own transport, with a connection failure on chosen ``sendRichMessage`` calls.
-
-    ``refused``: the connection never opens (httpx.ConnectError). ``pool``: no pooled connection is free
-    (httpx.PoolTimeout). ``lost``: the request reaches Telegram, then the connection drops before the reply
-    (httpx.ReadError), so the message is on screen and the sender cannot know it."""
-
-    def __init__(self) -> None:
-        self._inner = httpx.AsyncHTTPTransport()
-        self._rich_calls = 0
-        self.faults: dict[int, str] = {}  # sendRichMessage call number (from 1) -> fault
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if not request.url.path.endswith("/sendRichMessage"):
-            return await self._inner.handle_async_request(request)
-        self._rich_calls += 1
-        fault = self.faults.get(self._rich_calls)
-        if fault == "refused":
-            raise httpx.ConnectError("[Errno 61] Connection refused", request=request)
-        if fault == "pool":
-            raise httpx.PoolTimeout("no free connection", request=request)
-        response = await self._inner.handle_async_request(request)
-        if fault == "lost":
-            await response.aread()
-            raise httpx.ReadError("connection closed", request=request)
-        return response
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
-
-@dataclass
-class Sender:
-    standin: RichTelegramStandin
-    wire: Wire
-    adapter: HermesTelegramAdapter
-
-    def shown(self, chat: str) -> list[Any]:
-        return self.standin.visible(chat)
-
-    def words(self, chat: str) -> list[str]:
-        return [w for v in self.shown(chat) for w in _words(v.text)]
-
-    def refuse(self, method: str, description: str, *, status: int = 400, times: int = 10_000,
-               match: Callable[[dict[str, Any]], bool] | None = None, **parameters: Any) -> None:
-        body: dict[str, Any] = {"ok": False, "error_code": status, "description": description}
-        if parameters:
-            body["parameters"] = parameters
-        self.standin.fail(method, body, status=status, times=times, match=match)
-
-
-@pytest.fixture
-async def sender() -> AsyncIterator[Sender]:
-    from telegram import Bot
-    from telegram.request import HTTPXRequest
-
-    standin = RichTelegramStandin().start()
-    wire = Wire()
-    bot = Bot(standin.token, base_url=standin.api_base, request=HTTPXRequest(httpx_kwargs={"transport": wire}))
-    await bot.initialize()
-    adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token=standin.token))
-    adapter._bot = bot
-    adapter._telegram_chat_outbound_slot_secs = 0  # no 1 s pacing between parts in tests
-    try:
-        yield Sender(standin, wire, adapter)
-    finally:
-        await bot.shutdown()
-        standin.stop()
 
 
 def _words(text: str) -> list[str]:
@@ -126,14 +50,14 @@ async def test_a_one_part_answer_is_shown_exactly_once_whatever_the_connection_f
     # refused and pool never reached Telegram, so the base retry sends the answer again; lost did, so
     # nothing may send it again (before the fix: pool was given up, lost was shown twice).
     body = _answer(1)
-    sender.wire.faults[1] = fault
+    sender.wire.fail("sendRichMessage", 1, fault)
     await sender.adapter._send_with_retry(CHAT, body, base_delay=0)
     assert sender.words(CHAT) == _words(body)
 
 
 @pytest.mark.parametrize(("fault", "completes"), [("refused", True), ("pool", True), ("lost", False)])
 async def test_a_failed_middle_part_is_resumed_only_when_it_certainly_was_not_shown(sender, fault, completes):
-    sender.wire.faults[2] = fault
+    sender.wire.fail("sendRichMessage", 2, fault)
     result = await sender.adapter._send_with_retry(CHAT, LONG, base_delay=0)
     shown = sender.words(CHAT)
     if completes:
@@ -219,3 +143,25 @@ async def test_a_wide_table_shown_as_code_inside_a_longer_fence_is_not_refused(s
     body = "## Example\n\n````markdown\n```\n" + table + "```\n````\n"
     result = await sender.adapter.send(CHAT, body)
     assert result.success and [v.extra["kind"] for v in sender.shown(CHAT)] == ["rich"]
+
+
+
+# Regressions from the Codex review of slice 2 (docs/review-log.md).
+
+
+async def test_a_markdownv2_fallback_chunk_whose_reply_was_lost_is_not_sent_again(sender):
+    # The harvested chunk sender retries a dropped connection; inside a rich answer that shows it twice.
+    sender.refuse("sendRichMessage", "Bad Request: can't parse rich message")
+    sender.wire.fail("sendMessage", 1, "lost")
+    result = await sender.adapter._send_with_retry(CHAT, _answer(2, words=1500), base_delay=0)
+    assert not result.success
+    assert len(sender.standin.calls_of("sendMessage")) == 1  # the lost chunk once, nothing after it
+
+
+async def test_a_timedelta_flood_wait_on_a_fallback_chunk_is_waited_out(sender, monkeypatch):
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    sender.refuse("sendRichMessage", "Bad Request: can't parse rich message")
+    sender.refuse("sendMessage", "Too Many Requests: retry after 1", status=429, times=1, retry_after=1)
+    body = _answer(2, words=1500)
+    result = await sender.adapter._send_with_retry(CHAT, body, base_delay=0)
+    assert result.success and sender.words(CHAT) == _words(body)

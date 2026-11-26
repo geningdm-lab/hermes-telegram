@@ -117,3 +117,61 @@ Review: Codex `gpt-6.2-astra`, effort `high`, the fix commits after `c2ab3c7` up
 Not changed: the harvested chunk sender (`_send_chunk_with_retries`, hermes-agent@c419cf7 `plugins/platforms/telegram/adapter.py:3551`) retries a non-timeout `NetworkError` such as `httpx.ReadError` up to three times on its own. Every MarkdownV2 message goes through that helper, not just the fallback chunks of a rich answer. Changing it would change the bundled delivery policy for every ordinary message: after a dropped connection, the choice is between a possible duplicate and a possible loss. That decision belongs to the ordinary path as a whole, not to slice 1.
 
 Reopen in slice 3, which owns delivery failures and the failure message, or sooner if live use shows duplicated chunks after a network drop.
+
+## Slice 2, PR #4
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:1857b92` at `1552b36` (slice 2 and the slice 1 re-review fixes), 2026-11-25. Twenty-four findings: twenty-three accepted and fixed, one disputed. The reviewer found the reasoning sound for leaving the ordinary MarkdownV2 retry policy unchanged (slice 1, accepted in part), and showed that a rich answer's fallback chunks need not use it; that is now fixed.
+
+### Accepted and fixed
+
+The guards of `telegram_send`:
+
+| Finding | Fix |
+|---|---|
+| [P1] A loop or goal wakeup (an internal event on the user's route) can call `telegram_send` | the adapter records each human Telegram event it processes (`HumanTurnsMixin.on_processing_start`, internal events excluded) and forgets it when processing ends; a tool acts only for a recorded event, and a turn without an inbound message id (a synthetic source, `gateway/run_goals.py:112`) is refused at once; `checks/test_tools.py::test_a_tool_acts_only_while_the_users_own_event_is_processed` |
+| [P1] Notices and per-photo fallbacks escape the cap of 10 | the whole plan plus one combined notice is reserved before anything is sent, and a call the turn cannot hold sends nothing; each extra message of a refused album is charged; the notices of a call go as one message; `checks/e2e/test_file_sends.py::test_twenty_missing_photos_are_named_in_one_message`, `test_a_call_the_turn_cannot_hold_sends_nothing` |
+| [P1] A tool notice in a DM topic can fall back outside the topic | sends use the routing metadata Hermes builds for the event (`_thread_metadata_for_event`), with the DM-topic marker and reply anchor, so a gone topic fails closed; `test_a_notice_in_a_dm_topic_never_leaves_the_topic` |
+| [P2] Evicting old budgets can reset an active turn's count | the count lives on the turn's record and ends with it; no eviction of active turns short of 4096 at once |
+
+Duplicates after a lost reply:
+
+| Finding | Fix |
+|---|---|
+| [P1] A rich answer's MarkdownV2 fallback chunk is retried after a lost reply | `_send_chunk_markdown_or_plain` passes such an error on as `TimedOut`, which the harvested loop does not retry, for those chunks only; `checks/e2e/test_sender.py::test_a_markdownv2_fallback_chunk_whose_reply_was_lost_is_not_sent_again` |
+| [P1] An album whose reply was lost is replayed photo by photo | albums go through this plugin's own sender (`FilesMixin.send_photos`); only a refused or certainly unsent album is sent photo by photo; a lost reply is reported as "may or may not be in the chat"; `test_an_album_whose_reply_was_lost_is_not_sent_again_photo_by_photo`, `test_an_album_telegram_refused_is_sent_photo_by_photo` |
+| [P2] A `timedelta` flood wait on a fallback chunk crashes the harvested sender | passed on in seconds (`_FloodWait`), on every chunk; `test_a_timedelta_flood_wait_on_a_fallback_chunk_is_waited_out` |
+
+Files that end up silent or wrongly reported:
+
+| Finding | Fix |
+|---|---|
+| [P1] Batch success copied to every photo of an album | a receipt per photo, with its own message id or reason, through filtering, chunking and fallback; `test_each_photo_reports_its_own_message_id_and_an_oversize_one_its_reason` |
+| [P1] A `MEDIA:` path a remote or Docker backend cannot resolve stays silent | `extract_media` resolves each path with Hermes' own `filter_media_delivery_paths` and the session key Hermes uses for the response, on every backend, and passes a resolved path on resolved; `test_a_missing_media_path_is_named_on_a_remote_backend_too` |
+| [P1] A notice refused by a flood wait is marked as given and never sent | a notice counts as given once sent; one refused by a flood wait is sent after it; `test_a_notice_refused_by_a_flood_wait_arrives_after_it` |
+| [P2] `telegram_send` does not use Hermes' remote fetch | it resolves paths with the same Hermes resolver, off the gateway loop, in the tool's context, which carries the turn's profile |
+| [P2] Mixed files lose their order and the caption goes to the wrong file | the plan walks the files in order, only consecutive photos share an album, and the caption goes to the first send; `test_files_go_in_their_order_with_the_caption_on_the_first` |
+| [P2] An audio refusal quotes another file's error | each send keeps its own upload error (`_send_media`, `_upload_scope`); `test_an_audio_refusal_names_its_own_error_not_an_earlier_files` |
+| [P2] A file gone between the check and the upload is not named | `_send_local_file` names it when the harvested shell returns without calling `on_error`; `test_a_file_gone_before_its_upload_is_named` |
+| [P2] A document reached through a link is named after the link's target | the name the agent gave is passed as `file_name`; `test_a_document_keeps_the_name_the_agent_gave_when_it_is_a_link` |
+| [P2] A large photo is refused before the harvested sender compresses it | no size check before a photo send; an album measures the JPEG it uploads; a photo sent as a document measures the document |
+| [P2] Eleven photos become an album of 10 and a lone photo | albums are rebalanced to 9 and 2 (`album_chunks`); `checks/test_tools.py::test_photos_are_cut_into_albums_telegram_accepts`, and the gateway album test for 11 |
+| [P2] A placeholder is missed when Hermes hands back its resolved path | placeholders are keyed by the resolved path; `test_a_placeholder_notice_is_found_by_the_path_hermes_hands_back` |
+| [P2] The row 5 test compares lengths, not bytes | the stand-in records a SHA-256 of each upload, and the tests compare it with the file's |
+
+The cutter:
+
+| Finding | Fix |
+|---|---|
+| [P2] A long footnote definition can still miss its reference's part | each new reference reserves its definition while a part fills; `checks/test_rich.py::test_a_part_keeps_room_for_a_long_definition_its_reference_needs` |
+| [P2] A dollar inside `\[...\]` is escaped before the formula is recognized | one scan sets aside whichever formula opens first, whatever its delimiter (`_protect_maths`); `test_a_formula_body_is_never_touched_whatever_its_delimiter` |
+| [P2] A top-level indented code block is sent as an ordinary message | `needs_rich` counts every code segment; `test_a_top_level_indented_code_block_goes_rich` |
+
+### Disputed
+
+**[P1] Carry ambiguous delivery through the final-response ledger** (`hermes_telegram/answers.py`, `_send_retry_is_final`). Finding: after a final answer's reply is lost, Hermes' delivery ledger marks the obligation failed and redelivers the whole answer later (`gateway/platforms/base.py:4195`, `gateway/run_startup.py:487`), so the user can see it twice.
+
+Position: that resend is Hermes' recovery policy, and it is visible, not silent. The ledger's contract is "never silently resend an ambiguous send" (`gateway/delivery_ledger.py:1-10`): a failed or interrupted final is resent with a marker that says it may be a duplicate (`RECONNECTED_MARKER`, `FLOOD_MARKER`, `delivery_ledger.py:41-50`), and only after a backoff, with the last attempt kept for restart recovery (`retry_not_before`, `delivery_ledger.py:151-168`). This plugin removed the silent duplicate: the immediate, unmarked base retry (`_send_retry_is_final`). Suppressing the ledger's marked resend as well would trade a labelled possible duplicate for a possibly lost answer, which the ledger exists to prevent, and it would need the plugin to rewrite another module's delivery state.
+
+Reopen if the owner prefers losing an answer whose delivery is unknown over a marked resend, or if the ledger starts resending without a marker.
+
+Owner decision, 2026-11-25: keep the marked resend (docs/design.md, Decisions and open questions, 6).

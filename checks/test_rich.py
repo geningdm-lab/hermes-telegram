@@ -270,3 +270,27 @@ def test_ordinary_path_keeps_escapes_inside_html_code():
 def test_a_part_falling_back_to_markdownv2_loses_only_the_escapes_preparation_added():
     prepared = rich.prepare_markdown("List<String> costs $5, `a\\<b`")
     assert rich.plain_source(prepared) == "List<String> costs $5, `a\\<b`"
+
+
+# Regressions from the Codex review of slice 2 (docs/review-log.md).
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    (r"\[\verb|$|\]", r"$$\verb|$|$$"),  # a dollar inside a bracket formula is its source, not a price
+    (r"\(x = \$5\)", r"$x = \$5$"),
+    (r"cost $5, then \[a+b\]", r"cost \$5, then $$a+b$$"),
+])
+def test_a_formula_body_is_never_touched_whatever_its_delimiter(text: str, expected: str):
+    assert rich.prepare_markdown(text) == expected
+
+
+def test_a_top_level_indented_code_block_goes_rich():
+    assert rich.needs_rich("Run this:\n\n    a < b and $5\n") is True
+
+
+def test_a_part_keeps_room_for_a_long_definition_its_reference_needs():
+    paragraphs = "\n\n".join("".join(f"w{p:02d}{i:03d} " for i in range(142)) for p in range(32))
+    definition = "[^n]: " + "d" * 10_000
+    parts = rich.split_markdown("Ref[^n] here.\n\n" + paragraphs + "\n\n" + definition + "\n")
+    first = next(p for p in parts if "Ref[^n]" in p)
+    assert definition in first and len(first) <= rich.MAX_CHARS

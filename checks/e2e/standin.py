@@ -13,10 +13,13 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
 - ``editMessageText`` with ``rich_message`` instead of ``text`` (methods/editmessagetext.md).
 """
 
+import hashlib
 import re
 from typing import Any
 
-from tests.fakes.platforms._standin import Visible
+from aiohttp import web
+
+from tests.fakes.platforms._standin import Visible, decode_value
 from tests.fakes.platforms.telegram_standin import BotApiError, TelegramStandin
 
 RICH_MAX_CHARS = 32768
@@ -82,3 +85,95 @@ class RichTelegramStandin(TelegramStandin):
                 vis.extra["kind"] = "rich"
         return {"message_id": int(mid), "date": 0, "chat": self._chat(chat_id), "from": self._bot_user(),
                 "rich_message": {"blocks": []}}
+
+
+# --- media (slice 2) ------------------------------------------------------------------------------------
+# sendPhoto/sendVideo/sendAudio/sendVoice/sendAnimation/sendDocument and sendMediaGroup, checked against
+# api.md "Sending files" (multipart: 10 MB for photos, 50 MB for other files) and methods/sendmediagroup.md
+# (2-10 items; documents and audio only with their own kind). An uploaded part is recorded by the base
+# stand-in as {"filename", "size"}.
+
+PHOTO_UPLOAD_MAX = 10 * 1024 * 1024
+FILE_UPLOAD_MAX = 50 * 1024 * 1024
+CAPTION_MAX = 1024
+
+
+def _upload(p: dict[str, Any], field: str, limit: int) -> dict[str, Any]:
+    part = p.get(field)
+    if not isinstance(part, dict) or "size" not in part:
+        raise BotApiError(f"Bad Request: there is no {field} in the request")
+    if part["size"] > limit:
+        raise BotApiError("Request Entity Too Large", code=413)
+    if len(str(p.get("caption") or "")) > CAPTION_MAX:
+        raise BotApiError("Bad Request: message caption is too long")
+    return part
+
+
+class MediaTelegramStandin(RichTelegramStandin):
+    """``RichTelegramStandin`` that also answers the media methods the adapter uses.
+
+    An uploaded file is recorded as ``{"filename", "size", "sha256"}``: Hermes' stand-in keeps only the
+    size, which cannot tell the file's own bytes from other bytes of the same length."""
+
+    async def _params(self, request: web.Request) -> dict[str, Any]:
+        if not (request.content_type or "").startswith("multipart/"):
+            return await super()._params(request)
+        params: dict[str, Any] = dict(request.query)
+        reader = await request.multipart()
+        async for part in reader:
+            if part.filename:
+                data = await part.read()
+                params[part.name] = {"filename": part.filename, "size": len(data),
+                                     "sha256": hashlib.sha256(data).hexdigest()}
+            else:
+                params[part.name] = decode_value(await part.text())
+        return params
+
+    def _media(self, p: dict[str, Any], kind: str, field: str, limit: int) -> dict[str, Any]:
+        part = _upload(p, field, limit)
+        # The returned object has the required fields of its Bot API type (types/photosize.md, video.md,
+        # audio.md, voice.md, animation.md, document.md); PTB refuses a reply without them.
+        base = {"file_id": f"out-{kind}", "file_unique_id": f"o{kind}", "file_size": part["size"]}
+        shape = {
+            "photo": [{**base, "width": 1, "height": 1}],
+            "video": {**base, "width": 1, "height": 1, "duration": 1},
+            "animation": {**base, "width": 1, "height": 1, "duration": 1},
+            "audio": {**base, "duration": 1, "file_name": part.get("filename")},
+            "voice": {**base, "duration": 1},
+            "document": {**base, "file_name": part.get("filename")},
+        }[field]
+        return self._bot_message(p, caption=p.get("caption", ""), _kind=kind, **{field: shape})
+
+    def _m_sendPhoto(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "photo", "photo", PHOTO_UPLOAD_MAX)
+
+    def _m_sendDocument(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "document", "document", FILE_UPLOAD_MAX)
+
+    def _m_sendVideo(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "video", "video", FILE_UPLOAD_MAX)
+
+    def _m_sendAudio(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "audio", "audio", FILE_UPLOAD_MAX)
+
+    def _m_sendVoice(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "voice", "voice", FILE_UPLOAD_MAX)
+
+    def _m_sendAnimation(self, p: dict[str, Any]) -> dict[str, Any]:
+        return self._media(p, "animation", "animation", FILE_UPLOAD_MAX)
+
+    def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
+        media = p.get("media")
+        if not isinstance(media, list) or not 2 <= len(media) <= 10:
+            raise BotApiError("Bad Request: media group must contain 2-10 items")
+        kinds = {item.get("type") for item in media}
+        if len(kinds) > 1 and kinds & {"document", "audio"}:
+            raise BotApiError("Bad Request: documents and audio can be grouped only with their own kind")
+        out = []
+        for item in media:
+            ref = str(item.get("media", ""))
+            if ref.startswith("attach://"):
+                _upload({"part": p.get(ref[len("attach://"):]), "caption": item.get("caption")}, "part",
+                        PHOTO_UPLOAD_MAX if item.get("type") == "photo" else FILE_UPLOAD_MAX)
+            out.append(self._bot_message(p, caption=item.get("caption", ""), _kind=f"album-{item.get('type')}"))
+        return out

@@ -122,5 +122,8 @@ def registration_kwargs() -> dict[str, Any]:
 
 
 def register(ctx: Any) -> None:
-    """Plugin entry point, called by the Hermes plugin system."""
+    """Plugin entry point, called by the Hermes plugin system: the platform, then the agent's tools."""
+    from .tools import register_tools
+
     ctx.register_platform(**registration_kwargs())
+    register_tools(ctx)

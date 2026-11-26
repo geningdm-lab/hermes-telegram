@@ -38,6 +38,17 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "_rich_transient_result": "RichAnswersMixin",
     "_send_text_locked": "RichAnswersMixin",
     "_resume_partial_send": "RichAnswersMixin",
+    "_send_chunk_markdown_or_plain": "RichAnswersMixin",  # slice 2 review: fallback chunks, timedelta waits
+    # Slice 2, hermes_telegram/files.py.
+    "_send_local_file": "FilesMixin",
+    "send_document": "FilesMixin",
+    "send_image_file": "FilesMixin",
+    "send_multiple_images": "FilesMixin",
+    "send_video": "FilesMixin",
+    "send_voice": "FilesMixin",
+    "_send_media": "FilesMixin",
+    "on_processing_start": "HumanTurnsMixin",
+    "on_processing_complete": "HumanTurnsMixin",
 }
 
 

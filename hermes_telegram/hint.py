@@ -13,6 +13,8 @@ PLATFORM_HINT = (
     "<details><summary>title</summary>collapsed text</details>. Tables are fine: use them for tabular data. "
     "Maths is LaTeX and is rendered: $x^2$ inline, $$\\int_0^1 x\\,dx$$ as a block; write a literal "
     "dollar sign as \\$. Long answers are split into several messages for you. "
+    "To send files now, or a photo, video or recording as a downloadable file, call telegram_send "
+    "(as_files=true for files). "
     "You can send files natively: write MEDIA:/absolute/path/to/file in your response. "
     "Images (.png, .jpg, .webp) send as photos, videos (.mp4) play inline; image URLs via ![alt](url) send as "
     "photos. Audio: add [[audio_as_voice]] on its own line to send ANY audio file as a native voice bubble "

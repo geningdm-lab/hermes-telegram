@@ -1,0 +1,176 @@
+"""The Telegram turn an agent tool runs in: its chat, its guards, and the adapter and loop that serve it.
+
+docs/design.md (Agent interface, Tools) sets three guards, which every tool here passes through:
+
+- The model never names the recipient: the chat and topic are the turn's own, never a tool argument.
+- Tools act only in a turn a user's own Telegram message started. ``HumanTurnsMixin`` records each such
+  event as the adapter starts processing it (``on_processing_start``) and forgets it when processing ends;
+  a tool finds its turn there or is refused. Cron runs, loop and goal wakeups (internal events, whose
+  synthetic source carries no message id: ``gateway/run_goals.py:112``) and other surfaces have no record.
+- A turn sends at most ``MAX_SENDS_PER_TURN`` extra messages, counted on that record, so the count lives
+  exactly as long as the turn.
+
+``Turn`` is what a tool reads from Hermes' session context (``gateway/session_context.py``) on its own
+thread; ``AdmittedTurn`` is the adapter's record, read on the gateway loop. Sends use the record's routing
+metadata, built by Hermes' own ``_thread_metadata_for_event``, so a DM-topic send keeps the topic marker
+and reply anchor and fails rather than leave the topic.
+
+Reaching the live adapter follows Hermes' own send tool (``tools/send_message_senders.py:_live_adapter``):
+the gateway runner, then the adapter of the active profile, which under ``multiplex_profiles`` is the
+profile the turn was routed to. Tool handlers run on a worker loop (``model_tools._run_async``), so adapter
+calls are scheduled on the gateway's loop, as ``tools/send_message_tool.py:_dispatch_on_gateway_loop`` does.
+"""
+
+import asyncio
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any, TypeVar
+
+MAX_SENDS_PER_TURN = 10
+# Turns being processed at once, far above any real number; past it the oldest record is dropped.
+_TURN_MEMORY = 4096
+
+T = TypeVar("T")
+
+
+class TurnRefused(Exception):
+    """A tool call this turn may not make; the message is for the agent."""
+
+
+@dataclass(frozen=True)
+class Turn:
+    """The turn a tool call runs in, as Hermes' session context names it."""
+
+    session_key: str
+    chat_id: str
+    thread_id: str | None
+    inbound_message_id: str
+    profile: str
+
+    @classmethod
+    def current(cls) -> "Turn":
+        """The Telegram turn running in this context, or ``TurnRefused`` saying why there is none."""
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        if platform != "telegram":
+            raise TurnRefused("Telegram tools work only in a Telegram chat turn.")
+        if get_session_env("HERMES_CRON_SESSION", ""):
+            raise TurnRefused("Telegram tools do not run in scheduled (cron) turns.")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        session_key = get_session_env("HERMES_SESSION_KEY", "")
+        if not chat_id or not session_key:
+            raise TurnRefused("This turn has no Telegram chat to act in.")
+        message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+        if not message_id:
+            raise TurnRefused(_NOT_A_USER_TURN)
+        return cls(
+            session_key=session_key, chat_id=chat_id,
+            thread_id=get_session_env("HERMES_SESSION_THREAD_ID", "") or None,
+            inbound_message_id=message_id,
+            profile=get_session_env("HERMES_SESSION_PROFILE", ""))
+
+
+_NOT_A_USER_TURN = ("Telegram tools work only in a turn started by the user's own Telegram message, not in "
+                    "scheduled, automatic or background turns.")
+
+
+@dataclass
+class AdmittedTurn:
+    """A human Telegram event the adapter is processing: where its sends go, and how many it has sent."""
+
+    chat_id: str
+    thread_id: str | None
+    message_id: str
+    metadata: dict[str, Any]
+    limit: int = MAX_SENDS_PER_TURN
+    sent: int = field(default=0)
+
+    def take(self, count: int) -> None:
+        """Reserve ``count`` sends or refuse without reserving any. Runs on the gateway loop only."""
+        if self.sent + count > self.limit:
+            raise TurnRefused(
+                f"This turn may send at most {self.limit} extra messages; {self.sent} already sent and this "
+                f"call needs {count}. Put the rest in your answer.")
+        self.sent += count
+
+    def try_take(self, count: int = 1) -> bool:
+        if self.sent + count > self.limit:
+            return False
+        self.sent += count
+        return True
+
+    def give_back(self, count: int) -> None:
+        self.sent = max(0, self.sent - count)
+
+
+def _event_key(chat_id: Any, message_id: Any) -> tuple[str, str]:
+    return str(chat_id), str(message_id)
+
+
+class HumanTurnsMixin:
+    """Records the human Telegram events being processed; listed before the harvested mixins."""
+
+    def _human_turns(self) -> "OrderedDict[tuple[str, str], AdmittedTurn]":
+        return self.__dict__.setdefault("_hermes_telegram_human_turns", OrderedDict())
+
+    async def on_processing_start(self, event: Any) -> None:
+        await super().on_processing_start(event)
+        source = getattr(event, "source", None)
+        message_id = getattr(event, "message_id", None) or getattr(source, "message_id", None)
+        if getattr(event, "internal", False) or source is None or not message_id or not getattr(source, "chat_id", None):
+            return
+        from gateway.platforms.base import _thread_metadata_for_event
+
+        turns = self._human_turns()
+        turns[_event_key(source.chat_id, message_id)] = AdmittedTurn(
+            chat_id=str(source.chat_id), thread_id=str(source.thread_id) if source.thread_id else None,
+            message_id=str(message_id), metadata=dict(_thread_metadata_for_event(event) or {}))
+        while len(turns) > _TURN_MEMORY:
+            turns.popitem(last=False)
+
+    async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        source = getattr(event, "source", None)
+        message_id = getattr(event, "message_id", None) or getattr(source, "message_id", None)
+        if source is not None and message_id:
+            self._human_turns().pop(_event_key(source.chat_id, message_id), None)
+        await super().on_processing_complete(event, outcome)
+
+    def admitted_turn(self, turn: Turn) -> AdmittedTurn:
+        """The record of the human event ``turn`` runs for, or ``TurnRefused``. On the gateway loop."""
+        admitted = self._human_turns().get(_event_key(turn.chat_id, turn.inbound_message_id))
+        if admitted is None or (admitted.thread_id or None) != (turn.thread_id or None):
+            raise TurnRefused(_NOT_A_USER_TURN)
+        return admitted
+
+
+def live_adapter() -> tuple[Any, Any]:
+    """``(runner, adapter)`` serving Telegram for the active profile, or ``TurnRefused``."""
+    from gateway.config import Platform
+    from gateway.run import _gateway_runner_ref
+    from hermes_cli.profiles import get_active_profile_name
+
+    runner = _gateway_runner_ref()
+    if runner is None:
+        raise TurnRefused("No Telegram gateway runs in this process.")
+    resolve = getattr(runner, "_authorization_adapter", None)
+    adapter = (resolve(Platform.TELEGRAM, get_active_profile_name()) if callable(resolve)
+               else runner.adapters.get(Platform.TELEGRAM))
+    if adapter is None:
+        raise TurnRefused("This profile has no Telegram adapter.")
+    return runner, adapter
+
+
+async def on_gateway_loop(runner: Any, make: Callable[[], Awaitable[T]]) -> T:
+    """Await ``make()`` on the gateway's loop: adapter state (locks, the bot's HTTP client, the admitted turns)
+    belongs to it."""
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is None or loop is asyncio.get_running_loop():
+        return await make()
+    if not loop.is_running():
+        raise TurnRefused("The Telegram gateway is not running.")
+    future = asyncio.run_coroutine_threadsafe(make(), loop)
+    # A cancelled caller must not cancel a send already queued there: a retry would duplicate it.
+    return await asyncio.shield(asyncio.wrap_future(future))
+
