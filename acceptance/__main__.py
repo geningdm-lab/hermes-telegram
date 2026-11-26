@@ -100,7 +100,14 @@ async def _run(args: argparse.Namespace) -> int:
     owner = await find_owner(token)
     files = samples.generate()
     started, results = time.time(), []
-    record = STATE / "records" / f"record-{datetime.datetime.fromtimestamp(started):%Y%m%d-%H%M%S}.jsonl"
+    stamp = f"{datetime.datetime.fromtimestamp(started):%Y%m%d-%H%M%S}"
+    record = STATE / "records" / f"record-{stamp}.jsonl"
+    out = STATE / "reports" / f"acceptance-{stamp}.md"
+
+    def write_report() -> None:  # after every row, so an interrupted run keeps the rows it ran
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_report(results, started, args, str(record)), encoding="utf-8")
+
     recorder = Recorder(record, token)
     api = await recorder.start()
     prepare(owner, provider=args.provider, model=args.model, api=api, playbook=playbook(files))
@@ -121,15 +128,13 @@ async def _run(args: argparse.Namespace) -> int:
                 run.result.error = traceback.format_exc()
                 print(run.result.error)
             results.append(run.result)
+            write_report()
             print(f"--- Row {key}: {'pass' if run.result.passed else 'FAIL'}")
     finally:
+        if results:
+            print(f"\nReport: {out}")
         await asyncio.to_thread(gateway.stop)
         await recorder.stop()
-        if results:
-            out = STATE / "reports" / f"acceptance-{datetime.datetime.fromtimestamp(started):%Y%m%d-%H%M%S}.md"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(_report(results, started, args, str(record)), encoding="utf-8")
-            print(f"\nReport: {out}")
     return 0 if all(r.passed for r in results) else 1
 
 
