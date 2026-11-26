@@ -27,6 +27,14 @@ The profile must load plugins in the gateway process, which is Hermes' default (
 
 The plugin's Telegram configuration is the bundled one: the same `telegram:` keys, environment variables and `gateway.profile_routes` apply unchanged.
 
+The preview shows the growing answer (PRD row 7) only when Hermes streams it, and Hermes' default is not to (`streaming.enabled: false`, `gateway/config.py` `StreamingConfig`). Without streaming the preview shows the status until the final answer replaces it. To stream into the preview, the profile's `config.yaml` sets:
+
+```yaml
+streaming:
+  enabled: true
+  transport: auto   # drafts in a private chat
+```
+
 ## Install and enable together
 
 An installed plugin that is not enabled still shadows the bundled one, and Hermes then has no Telegram adapter at all: the bot goes silent. `checks/test_install.py` shows all three cases on the pinned Hermes:

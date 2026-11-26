@@ -331,8 +331,10 @@ async def row_15(run: Run) -> None:
     big, empty = run.files["big"].name, run.files["empty"].name
     run.check("the file over 50 MB is named, with the limit", big in text and "50" in text, text[:300])
     run.check("the empty file is named, with a reason", empty in text, text[:300])
-    run.check("neither was uploaded", not any(u["upload"] in (big, empty) for c in run.rec.sent(asked.at)
-                                              for u in uploads(c)))
+    # The plugin refuses the file over the Bot API's limit before uploading it; the empty one is Telegram's to
+    # refuse, and its reason is what the message names.
+    run.check("the file over 50 MB was not uploaded", not any(u["upload"] == big for c in run.rec.sent(asked.at)
+                                                             for u in uploads(c)))
     await run.compare(asked.at, "Row 15: does a message name each file and say why it did not arrive?")
 
 

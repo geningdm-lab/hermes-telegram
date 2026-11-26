@@ -224,6 +224,8 @@ def _call_lines(call: Call) -> list[str]:
 def _update_line(update: Update) -> str:
     body = update.body
     match update.kind:
+        case "message" if body.get("pinned_message"):
+            return f"Telegram: message {(body['pinned_message'] or {}).get('message_id')} pinned (a service message)"
         case "message":
             what = body.get("text") or ("a sticker " + str((body.get("sticker") or {}).get("emoji", ""))
                                         if body.get("sticker") else _media_kind(body) or "a message")
