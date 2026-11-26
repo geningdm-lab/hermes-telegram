@@ -36,6 +36,8 @@ Acceptance is the 17 rows of the Prism PRD, unchanged, together with the owner's
 
 Amendment, owner decision on PR #1 (2026-11-25): in row 1 the mathematical expression is rendered as a formula by Telegram, not shown in a code block. Its LaTeX source must equal the agent's. This departs from the Prism row on purpose; compare row 1 with that in mind.
 
+Live acceptance, 2026-11-26 (`acceptance/`, reports outside Git): rows 1 to 11 and 15 to 17, with the owner's additions X1 to X5, passed on `vtadevbot` and the owner's iOS client. **Rows 12 to 14 (widgets) were not accepted live.** Telegram refuses every `sendWidget` from the bot with `INPUT_MEDIA_WIDGET_NOT_ALLOWED`, a minimal widget with and without `allow_queries` included. This is Telegram's restriction, not the bot's configuration: since 2026-11-13 general bots may not send widgets even in private chats, there is no way to apply, and no date for lifting it (the Bot API maintainer in [tdlib/telegram-bot-api#947](https://github.com/tdlib/telegram-bot-api/issues/947); core.telegram.org/bots/widgets still lists private chats as available). The widget code of slice 5 is covered by offline checks only: `check_widget`, the payloads, and widget queries against the Bot API stand-in. How iOS draws a widget and its taps are unverified. In the live run a refused widget went back to the agent with Telegram's reason, and the agent answered in text. Run rows 12 to 14 (`python -m acceptance run 12 13 14`) when Telegram lets the bot send widgets again.
+
 ## What exists today
 
 Verified in the source of the pinned Hermes, `NousResearch/hermes-agent@c419cf7`, which `homelab/nix/flake.lock` deploys:
@@ -58,7 +60,7 @@ From core.telegram.org, read 2026-11-25. "Prod" means production Telegram in a p
 | Rich message: headings, tables (20 columns), task lists, details, footnotes, math, media blocks, buttons inside; 32768 chars, 500 blocks, 16 levels (10.1-10.5) | Prod, any chat | Off by default; hint forbids tables | Default for formatted answers |
 | Draft: streamed preview, ~30 s life, `<tg-thinking>` placeholder (9.3, rich 10.1) | Prod, private only | Text drafts | Rich draft with status and partial text |
 | Stop on a draft: `can_stop`, update `stopped_message_generation` (10.3) | Prod, private only | No | Stop button mapped to `/stop` |
-| Widget: one self-contained HTML document, QuickJS, no network, 32768 bytes and 4096 bytes after zlib level 9; `widget_query` back to the bot, 64 bytes, answered within 15 s; bot-written state up to 1024 bytes (10.4) | Prod, private only, not forwardable | No | Agent tool, validated before sending |
+| Widget: one self-contained HTML document, QuickJS, no network, 32768 bytes and 4096 bytes after zlib level 9; `widget_query` back to the bot, 64 bytes, answered within 15 s; bot-written state up to 1024 bytes (10.4) | Documented for prod, private only, not forwardable; refused to general bots since 2026-11-13 (see Acceptance) | No | Agent tool, validated before sending |
 | Inline buttons: callback (64 bytes), url, copy_text, colour `style` (9.4) | Prod | System prompts only | Agent tool; taps come back as events |
 | Media: photo 10 MB, other files 50 MB by upload; albums of 2-10; captions 1024 | Prod | Via `MEDIA:` | Kept, plus explicit send, albums and as-file |
 | Polls and quizzes (12 options) | Prod | No | Agent tool; answers come back as events |

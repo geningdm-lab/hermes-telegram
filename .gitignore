@@ -11,3 +11,5 @@ dist/
 report.xml
 junit*.xml
 .cache/
+# The acceptance run's 1Password references (acceptance/op.env.example).
+acceptance/op.env
