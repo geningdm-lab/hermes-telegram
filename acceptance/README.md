@@ -35,6 +35,8 @@ Everything runs by default; give row keys to run some (`run 2 11 X5`); `rows` li
 | 12, 13, 14 | `r12`, `r14` | four widgets Telegram accepted whose HTML needs no network; nothing delivered while the owner plays with them; one action with its widget, answered within 15 s | screenshots, interacts inside the widgets, taps Ask Lumi |
 | 17 | `r17a`, `r17b` | the cron report during the next turn's preview, the approval prompt still there, the work going on after one tap | taps the approval once |
 
+Rows 12 to 14 cannot pass for now: since 2026-11-13 Telegram refuses widgets from general bots (`INPUT_MEDIA_WIDGET_NOT_ALLOWED`; `docs/design.md`, Acceptance).
+
 ## After the runs
 
 Restart the host's `vtadevbot` gateway. The state directory can then be deleted: `~/.local/state/hermes-telegram-acceptance/`.
