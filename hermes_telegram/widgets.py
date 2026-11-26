@@ -22,6 +22,9 @@ widgets work only in the private chat with the bot.
   adapter admits as it would admit their text, the request reaches the agent as
   ``[widget] data="<data>" on widget <message id>`` (row 14). Every query reaches it once: the same query
   seen again is dropped, a second query with the same data is a second action.
+- When Telegram refuses the bot widgets (``INPUT_MEDIA_WIDGET_NOT_ALLOWED`` in the private chat, as it does
+  for general bots since 2026-11-13), the adapter stops offering them until the gateway restarts: the next
+  ``telegram_widget`` call refuses without asking Telegram, and new sessions are built without the tool.
 """
 
 import asyncio
@@ -42,6 +45,11 @@ DATA_MAX = 1024  # chat_data, public_data, answer data
 ANSWER_WITHIN = 14.0  # seconds after a query arrives; Telegram allows 15
 _WIDGET_MEMORY = 2000
 _QUERY_MEMORY = 512
+# Telegram's refusal of widgets to the bot itself: since 2026-11-13 general bots may not send them, even in
+# private chats (tdlib/telegram-bot-api#947). PTB capitalises the description, so it is matched lower-case.
+NOT_ALLOWED = "input_media_widget_not_allowed"
+WIDGETS_REFUSED = ("Telegram does not let this bot send widgets now. Answer without one: in text, a table, a "
+                   "formula, or an image sent as a file; do not call telegram_widget again.")
 
 # Called by the widget's code, these throw NetworkDisabledError (bots/widgets, "What widgets support").
 _NETWORK_CALL = re.compile(
@@ -149,6 +157,27 @@ def _wait_secs(exc: Exception) -> float:
 class WidgetsMixin:
     """Widgets and their queries; listed before the harvested mixins."""
 
+    # Set when Telegram refused this bot widgets (NOT_ALLOWED) in a private chat; held until the gateway restarts,
+    # whose first widget asks Telegram again.
+    widgets_refused: bool = False
+
+    def _refuse_widgets(self) -> None:
+        """Stop offering widgets. A session keeps the tool list it started with (agent/agent_init.py), so a
+        running one still has telegram_widget and ``send_widget`` refuses at once; sessions that start from now
+        on are built without it (``tools.widgets_available``), once Hermes' memo of tool lists is dropped."""
+        if self.widgets_refused:
+            return
+        self.widgets_refused = True
+        logger.warning("[%s] Telegram refuses this bot widgets (INPUT_MEDIA_WIDGET_NOT_ALLOWED): telegram_widget "
+                       "is withdrawn until the gateway restarts", self.name)
+        try:
+            import model_tools
+
+            model_tools._clear_tool_defs_cache()  # Hermes' own reset for a change its memo cannot see
+        except (ImportError, AttributeError):
+            logger.warning("[%s] Hermes' tool-list memo could not be dropped: new sessions may still be offered "
+                           "telegram_widget, which refuses at once", self.name, exc_info=True)
+
     def _widget(self, chat_id: Any, message_id: Any) -> Optional[dict[str, Any]]:
         """``{"thread": ..., "profile": ...}`` when ``message_id`` is one of the bot's widgets in ``chat_id``."""
         return self._store("widgets", _WIDGET_MEMORY).data.get(f"{chat_id}:{message_id}")
@@ -163,6 +192,8 @@ class WidgetsMixin:
 
         if int(normalize_telegram_chat_id(chat_id)) <= 0:
             return SendResult(success=False, error="widgets work only in the private chat with the bot")
+        if self.widgets_refused:
+            return SendResult(success=False, error=WIDGETS_REFUSED)
         thread_id = self._metadata_thread_id(metadata)
         routing = self._compute_single_send_routing(chat_id, None, metadata, thread_id)
         if routing is None:
@@ -180,6 +211,9 @@ class WidgetsMixin:
         try:
             sent = await self._bot.do_api_request("sendWidget", api_kwargs=payload)
         except Exception as exc:
+            if self._is_bad_request_error(exc) and NOT_ALLOWED in str(exc).lower():
+                self._refuse_widgets()
+                return SendResult(success=False, error=WIDGETS_REFUSED)
             return self._send_failed(exc, _redact_telegram_error_text(exc))
         message_id = sent.get("message_id") if isinstance(sent, dict) else getattr(sent, "message_id", None)
         self._reshow_soon(chat_id, thread_id)
