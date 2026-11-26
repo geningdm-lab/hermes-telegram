@@ -3,6 +3,7 @@ the composed adapter with the recording Bot API client of checks/fake_bot.py.
 """
 
 import itertools
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -183,3 +184,38 @@ async def test_an_uncertain_widget_keeps_its_slot_and_says_not_to_send_it_again(
     with pytest.raises(TurnRefused) as refused:
         await tools._send_widget(adapter, turn, {"html": HTML})
     assert admitted.sent == kept and ("do not send it again" in str(refused.value)) is bool(kept)
+
+
+# --- Telegram refusing the bot widgets ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("error", "withdrawn"), [
+    (BadRequest("Input_media_widget_not_allowed"), True),  # PTB's wording of Telegram's refusal to the bot
+    (BadRequest("Widget_too_large"), False),  # a refusal of this widget only
+    (TimedOut("read timed out"), False),
+])
+async def test_once_telegram_refuses_the_bot_widgets_none_is_sent_or_offered_again(adapter, monkeypatch, error,
+                                                                                  withdrawn):
+    # Live run 2026-11-26, row 12: five sendWidget calls in one turn, each refused; since 2026-11-13 Telegram
+    # refuses widgets to general bots (tdlib/telegram-bot-api#947).
+    # Hermes' memo of tool lists (model_tools.py); importing the real module registers Hermes' platforms and
+    # tools in this process, and checks/e2e/test_widgets_refused.py drops the real one.
+    memo = {("memo",): [{"function": {"name": "telegram_widget"}}]}
+    monkeypatch.setitem(sys.modules, "model_tools", SimpleNamespace(_clear_tool_defs_cache=memo.clear))
+    monkeypatch.setattr(tools, "_available", lambda: True)
+    monkeypatch.setattr(tools, "live_adapter", lambda: (None, adapter))
+    turn, admitted = _turn()
+    adapter.admitted_turn = lambda t: admitted
+    adapter.bot_stub.fail["sendWidget"] = [error]
+    with pytest.raises(TurnRefused) as first:
+        await tools._send_widget(adapter, turn, {"html": HTML})
+    assert ("does not let this bot send widgets" in str(first.value)) is withdrawn
+    if not withdrawn:
+        await tools._send_widget(adapter, turn, {"html": HTML})
+    else:
+        with pytest.raises(TurnRefused, match="do not call telegram_widget again"):
+            await tools._send_widget(adapter, turn, {"html": HTML})
+    assert len(adapter.bot_stub.of("sendWidget")) == (1 if withdrawn else 2)
+    # A session built from now on: no widget tool, and Hermes' memo of tool lists no longer holds one with it.
+    assert tools.widgets_available() is not withdrawn
+    assert (("memo",) in memo) is not withdrawn

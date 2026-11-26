@@ -43,6 +43,20 @@ def _available() -> bool:
     return session_surface() == "telegram"
 
 
+def widgets_available() -> bool:
+    """``_available``, unless Telegram refused this profile's bot widgets (``WidgetsMixin._refuse_widgets``).
+
+    Read when Hermes builds a session's tool list. When the adapter cannot be told, the tool stays offered:
+    the adapter itself refuses without asking Telegram once it has been refused."""
+    if not _available():
+        return False
+    try:
+        _, adapter = live_adapter()
+    except TurnRefused:
+        return True
+    return not getattr(adapter, "widgets_refused", False)
+
+
 SEND_SCHEMA: dict[str, Any] = {
     "name": "telegram_send",
     "description": (
@@ -698,15 +712,16 @@ def register_tools(ctx: Any) -> None:
     """Register the toolset's tools on the plugin context."""
     from tools.registry import no_cache_check_fn
 
-    check = no_cache_check_fn(_available)
+    check, widgets = no_cache_check_fn(_available), no_cache_check_fn(widgets_available)
     ctx.register_tool(name="telegram_send", toolset=TOOLSET, schema=SEND_SCHEMA, handler=telegram_send,
                       check_fn=check, is_async=True, description=SEND_SCHEMA["description"], emoji="📎")
     ctx.register_tool(name="telegram_status", toolset=TOOLSET, schema=STATUS_SCHEMA, handler=telegram_status,
                       check_fn=check, is_async=True, description=STATUS_SCHEMA["description"], emoji="💭")
-    for name, schema, handler, emoji in (("telegram_poll", POLL_SCHEMA, telegram_poll, "📊"),
-                                         ("telegram_react", REACT_SCHEMA, telegram_react, "👍"),
-                                         ("telegram_sticker", STICKER_SCHEMA, telegram_sticker, "🎴"),
-                                         ("telegram_widget", WIDGET_SCHEMA, telegram_widget, "🧩"),
-                                         ("telegram_message", MESSAGE_SCHEMA, telegram_message, "✏️")):
-        ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler, check_fn=check,
+    for name, schema, handler, emoji, available in (
+            ("telegram_poll", POLL_SCHEMA, telegram_poll, "📊", check),
+            ("telegram_react", REACT_SCHEMA, telegram_react, "👍", check),
+            ("telegram_sticker", STICKER_SCHEMA, telegram_sticker, "🎴", check),
+            ("telegram_widget", WIDGET_SCHEMA, telegram_widget, "🧩", widgets),
+            ("telegram_message", MESSAGE_SCHEMA, telegram_message, "✏️", check)):
+        ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler, check_fn=available,
                           is_async=True, description=schema["description"], emoji=emoji)
