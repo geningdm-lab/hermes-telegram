@@ -9,9 +9,10 @@ The PRD's acceptance (`docs/design.md`, Acceptance) is a live run of each row on
 
 ## Before the first run
 
-1. Stop the host's `vtadevbot` gateway. Telegram lets one process poll a bot; the run refuses to start while another does.
-2. Copy `acceptance/op.env.example` to `acceptance/op.env` and fill in the 1Password references (`op://vault/item/field`) of the bot token and the model key. The file holds references only and is ignored by Git; `op run` resolves them into the run's environment, so no secret is written to disk or shown.
-3. The first run asks you to send the bot any message from iOS and to confirm the account it came from; it keeps that user id for later runs (`owner-id` in the state directory). `TELEGRAM_OWNER_ID` in `op.env` sets it instead.
+1. Bring the environment to the pin: `mise exec -- uv sync --all-groups` (Hermes with its Telegram and Anthropic extras) and `scripts/hermes-src.sh` (Hermes' source at the pin, whose translations the gateway reads, as the host's Nix wrapper gives them).
+2. Stop the host's `vtadevbot` gateway. Telegram lets one process poll a bot; the run refuses to start while another does.
+3. Copy `acceptance/op.env.example` to `acceptance/op.env` and fill in the 1Password references (`op://vault/item/field`) of the bot token and the model key. The file holds references only and is ignored by Git; `op run` resolves them into the run's environment, so no secret is written to disk or shown.
+4. The first run asks you to send the bot any message from iOS and to confirm the account it came from; it keeps that user id for later runs (`owner-id` in the state directory). `TELEGRAM_OWNER_ID` in `op.env` sets it instead.
 
 ## A run
 

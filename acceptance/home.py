@@ -9,8 +9,13 @@ environment ``op run`` builds from 1Password references (``acceptance/op.env``).
 The gateway reaches Telegram through the recording proxy (``recorder``): ``extra.base_url`` points
 python-telegram-bot at it. With a ``base_url`` set, the harvested adapter assumes a local Bot API server
 for inbound downloads (``_max_doc_bytes``, 2 GB instead of 20 MB); no row sends the bot a file that large.
+
+A git install of Hermes ships without its translations (its setup.py); the host's Nix wrapper points
+``HERMES_BUNDLED_LOCALES`` at them, and this gateway gets the pinned source tree's, so its own messages
+(the failure notice of row 10) read as on the host instead of as catalog keys.
 """
 
+import importlib.util
 import os
 import shutil
 import signal
@@ -26,6 +31,9 @@ REPO = Path(__file__).resolve().parents[1]
 STATE = Path(os.environ.get("HERMES_TELEGRAM_ACCEPTANCE_DIR",
                             "~/.local/state/hermes-telegram-acceptance")).expanduser()
 HOME = STATE / "hermes"
+HERMES_SRC = REPO / ".cache" / "hermes-agent"
+# The SDK a provider's client needs; the gateway refuses to install one lazily.
+_PROVIDER_SDK = {"anthropic": "anthropic"}
 ADAPTER_LINE = "Telegram adapter HermesTelegramAdapter from "
 # An answer whose model call fails (row 10): the provider refuses this key.
 BROKEN_KEY = "invalid-key-for-the-acceptance-failure-row"
@@ -33,9 +41,24 @@ _KEY_VARS = ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "GOOGL
              "NOUS_API_KEY", "DEEPINFRA_API_KEY")
 
 
+def bundled_locales() -> Path:
+    """Hermes' translations at the pin (``HERMES_PIN``), from its source tree."""
+    pin = (REPO / "HERMES_PIN").read_text().strip()
+    head = subprocess.run(["git", "-C", str(HERMES_SRC), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    if head != pin or not (HERMES_SRC / "locales" / "en.yaml").is_file():
+        raise SystemExit(f"Hermes' translations come from its source at the pin {pin[:7]} ({HERMES_SRC}): "
+                         "run scripts/hermes-src.sh")
+    return HERMES_SRC / "locales"
+
+
 def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str) -> Path:
     """The acceptance profile's home, with this working tree's plugin installed as docs/install.md says, the
     bot's calls going through the proxy at ``api``, and the rows' playbook as the agent's SOUL.md."""
+    sdk = _PROVIDER_SDK.get(provider)
+    if sdk and importlib.util.find_spec(sdk) is None:
+        raise SystemExit(f"The {provider} provider needs the {sdk} package in this environment: "
+                         "run `mise exec -- uv sync --all-groups`.")
     HOME.mkdir(parents=True, exist_ok=True)
     plugin = HOME / "plugins" / "platforms" / "telegram"
     shutil.rmtree(plugin, ignore_errors=True)
@@ -74,7 +97,7 @@ class Gateway:
         env.update(HERMES_HOME=str(HOME), TELEGRAM_ALLOWED_USERS=str(self.owner_id),
                    TELEGRAM_HOME_CHANNEL=str(self.owner_id),
                    # The proxy is the only address: no fallback IPs, no system proxy in front of it.
-                   HERMES_TELEGRAM_DISABLE_FALLBACK_IPS="1",
+                   HERMES_TELEGRAM_DISABLE_FALLBACK_IPS="1", HERMES_BUNDLED_LOCALES=str(bundled_locales()),
                    NO_PROXY=",".join(filter(None, ("127.0.0.1", "localhost", env.get("NO_PROXY")))))
         if broken:
             for key in _KEY_VARS:

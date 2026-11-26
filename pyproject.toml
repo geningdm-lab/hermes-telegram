@@ -10,8 +10,9 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-  # The Hermes commit homelab deploys, with its Telegram extra (python-telegram-bot 22.8).
-  "hermes-agent[telegram] @ git+https://github.com/NousResearch/hermes-agent.git@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee",
+  # The Hermes commit homelab deploys, with its Telegram extra (python-telegram-bot 22.8), and its Anthropic
+  # extra: the SDK of the acceptance run's default provider (acceptance/README.md).
+  "hermes-agent[telegram,anthropic] @ git+https://github.com/NousResearch/hermes-agent.git@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee",
   # Test pins follow Hermes' own dev group at that commit.
   "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
