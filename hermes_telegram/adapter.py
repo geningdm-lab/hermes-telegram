@@ -12,6 +12,7 @@ plugin changes goes into its own mixins, listed before the harvested ones so the
 - ``PreviewMixin`` (slice 3): the preview of a turn in a private chat: status, partial answer, Stop.
 - ``ButtonsMixin`` (slice 4): the agent's action buttons, whose taps come back to it as messages.
 - ``ActionsMixin`` (slice 4): polls, reactions and stickers, and the answers and reactions that come back.
+- ``WidgetsMixin`` (slice 5): widgets as visual answers, and their requests back to the agent.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
@@ -35,11 +36,13 @@ from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
 from .turn import HumanTurnsMixin
 from .preview import PreviewMixin
 from .updates import UpdateKindsMixin
+from .widgets import WidgetsMixin
 
 
 class HermesTelegramAdapter(
     # This plugin's behaviour.
     ButtonsMixin,
+    WidgetsMixin,
     ActionsMixin,
     PreviewMixin,
     RichAnswersMixin,

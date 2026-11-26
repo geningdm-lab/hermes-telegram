@@ -54,7 +54,7 @@ INTENDED_OVERRIDES: dict[str, str] = {
     "send_draft": "PreviewMixin",
     "_send_prompt": "PreviewMixin",
     "_send_with_dm_topic_reply_anchor_retry": "ActionsMixin",
-    "_register_handlers": "ActionsMixin",
+    "_register_handlers": "WidgetsMixin",  # slice 5's handler, then slice 4's and slice 3's
     # Slice 4, hermes_telegram/buttons.py and actions.py.
     "_handle_callback_query": "ButtonsMixin",
     "_handle_sticker": "ActionsMixin",

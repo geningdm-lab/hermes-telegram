@@ -376,6 +376,85 @@ STICKER_SCHEMA: dict[str, Any] = {
 }
 
 
+WIDGET_SCHEMA: dict[str, Any] = {
+    "name": "telegram_widget",
+    "description": (
+        "Send a widget: a visual answer drawn inside the message, such as a diagram, a chart, a step-by-step "
+        "explanation or a UI prototype. html is one self-contained HTML document: inline <style> and <script>, "
+        "SVG or CSS for drawing, images only as data: URLs; at most 32 KB, and 4 KB after compression, so draw "
+        "with SVG and CSS. It runs on the user's device with no network: fetch, XMLHttpRequest and external "
+        "files do not work. Interaction inside it (tabs, steps, toggles) stays on the device. For an action "
+        "that needs you, the script calls TelegramWidget.request(data) with up to 64 bytes, and you receive "
+        "[widget] data=\"<data>\" on widget <id>; answer with a message, or with new widget state through "
+        "telegram_message. Every request reaches you as a new message, so call request on the user's action, "
+        "never on a timer. state is the widget's initial TelegramWidget.chatData (up to 1024 bytes). height "
+        "is 50 to 600 pixels, or 0 (the default) for the content's own height. Private chats only. Counts as "
+        "one extra message."),
+    "parameters": {"type": "object", "properties": {
+        "html": {"type": "string"},
+        "caption": {"type": "string", "maxLength": 1024},
+        "height": {"type": "integer", "minimum": 0, "maximum": 600},
+        "state": {"type": "string", "maxLength": 1024},
+    }, "required": ["html"]},
+}
+
+MESSAGE_SCHEMA: dict[str, Any] = {
+    "name": "telegram_message",
+    "description": (
+        "Change one of your messages in this Telegram conversation. op=widget_state sets a widget's state "
+        "(TelegramWidget.chatData, up to 1024 bytes); the widget redraws from it. \"\" removes the state."),
+    "parameters": {"type": "object", "properties": {
+        "op": {"type": "string", "enum": ["widget_state"]},
+        "message_id": {"type": "string"},
+        "state": {"type": "string", "maxLength": 1024},
+    }, "required": ["op", "message_id", "state"]},
+}
+
+
+async def _send_widget(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, Any]:
+    from .widgets import check_state, check_widget
+
+    html = args.get("html")
+    if not isinstance(html, str):
+        raise TurnRefused("html must be a string.")
+    why = check_widget(html) or check_state(args.get("state", ""))
+    if why:
+        raise TurnRefused(f"The widget was not sent: {why}.")
+    height = args.get("height") or 0
+    if not isinstance(height, int) or not (height == 0 or 50 <= height <= 600):
+        raise TurnRefused("height must be 50 to 600 pixels, or 0 for the content's own height.")
+    admitted = adapter.admitted_turn(turn)
+    admitted.take(1)
+    result = await adapter.send_widget(turn.chat_id, html, admitted.metadata, caption=str(args.get("caption") or ""),
+                                       height=height or None, state=args.get("state", ""), profile=turn.profile)
+    out = _sent_or_refused(admitted, result, "widget")
+    if isinstance(result.raw_response, dict) and result.raw_response.get("unrecorded"):
+        out["note"] = "The widget could not be recorded: its requests will not reach you."
+    return out
+
+
+async def _change_message(adapter: Any, turn: Turn, args: dict[str, Any]) -> dict[str, Any]:
+    from .widgets import check_state
+
+    adapter.admitted_turn(turn)
+    message_id = str(args.get("message_id") or "")
+    if args.get("op") != "widget_state" or not message_id.isdigit():
+        raise TurnRefused("op must be widget_state, with the widget's message_id.")
+    if "state" not in args:
+        raise TurnRefused("state is required: the widget's new state, or \"\" to remove it.")
+    why = check_state(args["state"])
+    if why:
+        raise TurnRefused(f"The widget's state was not changed: {why}.")
+    widget = adapter._widget(turn.chat_id, message_id)
+    if (widget is None or (widget.get("thread") or None) != (turn.thread_id or None)
+            or (widget.get("profile") or "") != (turn.profile or "")):
+        raise TurnRefused("That is not one of your widgets in this conversation.")
+    result = await adapter.set_widget_state(turn.chat_id, message_id, args["state"])
+    if not result.success:
+        raise TurnRefused(f"The widget's state was not changed: {result.error}")
+    return {"changed": True, "message_id": message_id}
+
+
 def _parse_poll(args: dict[str, Any]) -> tuple[str, list[str], Optional[int], bool]:
     question, options = args.get("question"), args.get("options")
     if not isinstance(question, str) or not question.strip():
@@ -464,6 +543,8 @@ telegram_poll = _handler(lambda adapter, turn, args: _send_poll(adapter, turn, _
 telegram_react = _handler(lambda adapter, turn, args: _react(
     adapter, turn, str(args.get("emoji") or "").strip() or _no_emoji(), args.get("message_id")))
 telegram_sticker = _handler(_sticker)
+telegram_widget = _handler(_send_widget)
+telegram_message = _handler(_change_message)
 
 
 def _no_emoji() -> str:
@@ -481,6 +562,8 @@ def register_tools(ctx: Any) -> None:
                       check_fn=check, is_async=True, description=STATUS_SCHEMA["description"], emoji="💭")
     for name, schema, handler, emoji in (("telegram_poll", POLL_SCHEMA, telegram_poll, "📊"),
                                          ("telegram_react", REACT_SCHEMA, telegram_react, "👍"),
-                                         ("telegram_sticker", STICKER_SCHEMA, telegram_sticker, "🎴")):
+                                         ("telegram_sticker", STICKER_SCHEMA, telegram_sticker, "🎴"),
+                                         ("telegram_widget", WIDGET_SCHEMA, telegram_widget, "🧩"),
+                                         ("telegram_message", MESSAGE_SCHEMA, telegram_message, "✏️")):
         ctx.register_tool(name=name, toolset=TOOLSET, schema=schema, handler=handler, check_fn=check,
                           is_async=True, description=schema["description"], emoji=emoji)

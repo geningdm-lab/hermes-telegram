@@ -271,3 +271,38 @@ State:
 Not done: separate files per profile home. The stores live in the adapter's home (`_update_receipt_dir`), next to the update receipts Hermes keeps there for the same bot (hermes-agent@c419cf7:plugins/platforms/telegram/adapter.py:595); one bot's state stays together, and the gateway process that owns the bot reads it either way. The configured sticker sets stay shared: they are public sets named in the adapter's own config.
 
 Reopen if profiles of one bot run under separate OS users, or a profile's records must not be readable by the gateway that serves the others.
+
+## Slice 5, PR #7
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:slice/4-actions` (`330e95a`) at `485d731`, 2026-11-25. Fourteen findings, all accepted and fixed, on top of the slice 4 fixes merged in (`784f395`). The tests named are in `checks/test_widget_events.py` unless another file is given; each was checked against a mutation of its fix.
+
+### Accepted and fixed
+
+A widget's requests:
+
+| Finding | Fix |
+|---|---|
+| [P1] A widget's request skips the text's admission | `_actor_admitted` (slice 4) before the request reaches the agent; the answer to Telegram still comes first; `test_a_request_by_a_user_the_adapter_does_not_admit_is_answered_and_reaches_nobody` |
+| [P1] Every request lands in the root chat | each widget is kept with its topic, and a request reaches that topic; only this bot's widgets, in the private chat, for the widget's profile; `test_a_request_reaches_the_topic_the_widget_is_in_after_a_restart`, `test_a_request_for_anything_but_this_bots_widget_reaches_nobody`, `test_a_widget_sent_by_one_profile_takes_no_request_routed_to_another` |
+| [P1] The 10 s filter drops a real second press | deduplication by query id only; `test_two_presses_with_the_same_data_are_two_actions_and_a_repeated_query_is_one`. Telegram marks no request as a background one, so the tool's description and the hint tell the agent to request on the user's action, never on a timer. |
+| [P2] A flood wait on the answer is not retried | answered again while Telegram certainly did not take it and the 15 s allow it; never after a timeout that may have reached it; `test_an_answer_telegram_certainly_did_not_take_is_sent_again_within_the_deadline` |
+| [P2] The answer check counts other tests' answers | `checks/e2e/test_widgets.py` checks one answer per query id it pushed; `test_two_presses_with_the_same_data_reach_the_agent_twice_each_answered_once` |
+
+State and sending:
+
+| Finding | Fix |
+|---|---|
+| [P1] A state edit can change another topic's widget | only a widget of the same chat, topic and profile; `test_the_agent_changes_only_its_widgets_in_its_own_conversation` |
+| [P2] Widget ownership is lost on restart | `telegram_widgets.json`, a store of its own, not the reaction index; `test_a_request_reaches_the_topic_the_widget_is_in_after_a_restart` |
+| [P2] An uncertain widget send refunds its slot | `_send_failed` and `_sent_or_refused` from slice 4; `test_an_uncertain_widget_keeps_its_slot_and_says_not_to_send_it_again` |
+| [P2] A missing state erases the widget's state | `state` is required, `""` clears it; `test_a_state_change_needs_a_state_and_an_empty_one_clears_it` |
+| [P2] An unchanged state is reported as a failure | "message is not modified" is success, as bots/widgets says; the stand-in now answers it; `test_a_state_the_widget_already_has_is_a_change_made` |
+| [P3] State with a NUL or a lone surrogate | `check_state` for the send and the edit; the stand-in refuses NUL; `checks/test_widgets.py::test_a_state_is_held_to_telegrams_limits`, `test_a_widget_telegram_would_refuse_is_refused_unsent` |
+| [P3] Height 0 is refused | 0 is Telegram's automatic height; `test_height_zero_is_the_contents_own_height` |
+
+The widget check:
+
+| Finding | Fix |
+|---|---|
+| [P2] Text naming an API, and links, are refused | the network check reads only the widget's code, without its string literals and comments; `<a href>` is allowed; `checks/test_widgets.py::test_a_widget_that_only_mentions_the_network_or_links_out_passes` |
+| [P2] Relative images and workers pass | every resource attribute and CSS `url()` must be a fragment or a `data:` PNG, JPEG, GIF or WebP; `Worker`, `SharedWorker`, `BroadcastChannel` and `RTCPeerConnection` are network APIs; media and frame elements are refused; `checks/test_widgets.py::test_a_widget_telegram_or_its_sandbox_would_refuse_is_named_with_the_reason` |
