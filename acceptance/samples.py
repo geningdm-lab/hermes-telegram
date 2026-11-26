@@ -1,8 +1,7 @@
 """Synthetic samples the acceptance rows send, generated under ``STATE/samples`` (ffmpeg from mise).
 
-Photos are solid colours, so the order of an album can be read back from the photos Telegram delivers (it
-recompresses them, so their bytes cannot be compared). Every other file's checksum is compared with the one
-the user downloads.
+The record identifies every upload by its SHA-256, so an album's order is read from what the bot uploaded.
+The album photos are solid colours, so the owner can see that order on iOS too.
 """
 
 import hashlib
@@ -17,6 +16,8 @@ SAMPLES = STATE / "samples"
 # Twelve hues far enough apart to tell after JPEG recompression; the first three are row 4's album of 3.
 COLOURS = ["ff0000", "00a000", "0000ff", "ffff00", "ff00ff", "00ffff", "ff8000", "8000ff", "808080", "804000",
            "ffffff", "000000"]
+COLOUR_NAMES = ["red", "green", "blue", "yellow", "magenta", "cyan", "orange", "purple", "grey", "brown", "white",
+                "black"]
 BIG_BYTES = 51 * 1024 * 1024  # over the Bot API's 50 MB upload limit (row 15)
 
 
@@ -67,13 +68,3 @@ def generate() -> dict[str, Path]:
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-
-def colour_of(image: bytes) -> str:
-    """The average colour of a delivered photo, as the nearest of ``COLOURS``."""
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", "pipe:", "-vf", "scale=1:1", "-f", "rawvideo",
-                          "-pix_fmt", "rgb24", "pipe:"], input=image, capture_output=True, check=True).stdout[:3]
-
-    def distance(hex_colour: str) -> int:
-        return sum((raw[i] - int(hex_colour[2 * i:2 * i + 2], 16)) ** 2 for i in range(3))
-
-    return min(COLOURS, key=distance)

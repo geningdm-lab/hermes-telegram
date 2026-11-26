@@ -2,9 +2,13 @@
 ``hermes gateway run`` serving ``vtadevbot`` from it.
 
 Nothing here touches an existing Hermes home or profile. Everything lives under ``STATE`` (outside the
-repository): the Hermes home, the samples, the Telegram session of the owner's account, and the reports.
-Secrets never pass through this code as values written to disk: the bot token and the model key come from
-the environment ``op run`` builds from 1Password references (``acceptance/op.env``).
+repository): the Hermes home, the samples, the record of the bot's calls, and the reports. Secrets never
+pass through this code as values written to disk: the bot token and the model key come from the
+environment ``op run`` builds from 1Password references (``acceptance/op.env``).
+
+The gateway reaches Telegram through the recording proxy (``recorder``): ``extra.base_url`` points
+python-telegram-bot at it. With a ``base_url`` set, the harvested adapter assumes a local Bot API server
+for inbound downloads (``_max_doc_bytes``, 2 GB instead of 20 MB); no row sends the bot a file that large.
 """
 
 import os
@@ -29,8 +33,9 @@ _KEY_VARS = ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "GOOGL
              "NOUS_API_KEY", "DEEPINFRA_API_KEY")
 
 
-def prepare(owner_id: int, *, provider: str, model: str) -> Path:
-    """The acceptance profile's home, with this working tree's plugin installed as docs/install.md says."""
+def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str) -> Path:
+    """The acceptance profile's home, with this working tree's plugin installed as docs/install.md says, the
+    bot's calls going through the proxy at ``api``, and the rows' playbook as the agent's SOUL.md."""
     HOME.mkdir(parents=True, exist_ok=True)
     plugin = HOME / "plugins" / "platforms" / "telegram"
     shutil.rmtree(plugin, ignore_errors=True)
@@ -38,7 +43,8 @@ def prepare(owner_id: int, *, provider: str, model: str) -> Path:
     config = {
         "model": {"provider": provider, "default": model},
         "plugins": {"enabled": ["platforms/telegram"]},
-        "platforms": {"telegram": {"enabled": True}},
+        "platforms": {"telegram": {"enabled": True, "extra": {"base_url": f"{api}/bot",
+                                                               "base_file_url": f"{api}/file/bot"}}},
         # Row 10's acceptance profile: the failure message is the only one the chat shows.
         "display": {"suppress_warning_notifications": True},
         # Row 17: a dangerous command waits for the owner's tap.
@@ -47,7 +53,7 @@ def prepare(owner_id: int, *, provider: str, model: str) -> Path:
     }
     with open(HOME / "config.yaml", "w", encoding="utf-8") as out:
         YAML().dump(config, out)
-    (HOME / ".owner").write_text(str(owner_id))
+    (HOME / "SOUL.md").write_text(playbook, encoding="utf-8")
     return HOME
 
 
@@ -66,7 +72,10 @@ class Gateway:
             raise SystemExit("Run under `op run --env-file acceptance/op.env`: the bot token and a model key "
                              "come from 1Password (acceptance/README.md).")
         env.update(HERMES_HOME=str(HOME), TELEGRAM_ALLOWED_USERS=str(self.owner_id),
-                   TELEGRAM_HOME_CHANNEL=str(self.owner_id))
+                   TELEGRAM_HOME_CHANNEL=str(self.owner_id),
+                   # The proxy is the only address: no fallback IPs, no system proxy in front of it.
+                   HERMES_TELEGRAM_DISABLE_FALLBACK_IPS="1",
+                   NO_PROXY=",".join(filter(None, ("127.0.0.1", "localhost", env.get("NO_PROXY")))))
         if broken:
             for key in _KEY_VARS:
                 if env.get(key):
