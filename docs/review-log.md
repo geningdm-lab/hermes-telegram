@@ -405,3 +405,25 @@ Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:origin/main` at `802
 | [P2] Open existing stores without initializing or modifying foreign files | without `create`, a file that is not this version's inbox is refused, an empty one included; permissions are set only on a file found or made to be the inbox; same test |
 | [P3] Define the first version consistently for edit-only records | the contract documents it: a record first seen through an edit starts with that edit's time; `test_a_record_reads_with_its_versions_its_deletion_its_reply_and_a_link` |
 | [P3] Exercise profile selection with two distinct test inboxes | `hermes -p work` against a default and a `work` home with different records; `test_hermes_p_reads_the_selected_profiles_base_only`. Not mutation-checked: profile selection is Hermes' own |
+
+## Business inbox, slice 3 (acceptance kit), PR #18
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:origin/main` at `0708617`, 2026-11-28 (the kit's rows B1, B2, B3 and BL; no live run). Fifteen findings, all accepted and fixed. The tests named are in `checks/test_acceptance_kit.py`; those marked were checked against a mutation of their fix.
+
+| Finding | Fix |
+|---|---|
+| [P1] Check the raw call record for activity in the business chat | the rows read `rec.calls` (`_calls`), typing included; `test_the_business_rows_flag_any_call_into_the_chat_but_a_connection_lookup` (mutation-checked) |
+| [P1] Require all business rights to be off before sending a probe | B1 waits for an enabled connection of the owner's that grants no right, naming any still on, and `status` must show that same connection; the dry run starts with `can_reply` on |
+| [P1] Close the observation window before certifying no side effects | `_nothing_happened` waits until the bot has made no call for 20 s, after the owner's answer, then checks every call since the row began and the agent's log; B2 and B3 too |
+| [P1] Record negative link results without failing the experiment | each link answer is a finding in one check's detail, the check being that every candidate was tried; `test_the_business_rows_pass_a_dry_run_on_synthetic_updates` with an honest no (mutation-checked) |
+| [P2] Bind subsequent updates to B1's connection and private chat | B1 keeps the connection; B2, B3 and BL accept only its updates in that chat, and the deletion only after the edit and naming that message |
+| [P2] Verify the edited record is still present before deleting it | B3 reads the record back after the edit (both versions, the newest as the text, not deleted), then after the deletion |
+| [P2] Open the candidate links from the owner's iOS account | BL tells the owner to switch back to the main account and open the links from its Saved Messages |
+| [P2] Use the delivered text for storage and agent checks | the text as Telegram delivered it is what the inbox and the log are searched for |
+| [P2] Do not treat operator or polling timeouts as delivery evidence | B2 waits for the owner's Enter, counts deliveries from the instruction, and calls a miss inconclusive unless the gateway kept polling meanwhile. Not tested: it needs a minute of waiting |
+| [P2] Treat an unavailable agent log as missing evidence | `agent_saw` is None without a log, and the row does not certify "no agent turn saw it" then; `test_the_agent_log_check_tells_no_log_from_a_log_without_the_text`, `test_without_an_agent_log_the_row_does_not_certify_that_no_turn_saw_it` (mutation-checked) |
+| [P2] Keep the agent-log query off the recording proxy's event loop | `agent_saw` reads in a thread, as `inbox` does |
+| [P2] Read the opaque chat reference from the CLI | `_find` takes the chat ref from `chats` and the record ref from `window`; B3 reuses them |
+| [P2] Keep private record details out of the acceptance report | check details give kinds and counts (`_shape`); link questions name the candidate only, the URLs stay on the terminal; the dry run asserts no id in what is asked (mutation-checked) |
+| [P2] Make a retained connection usable on the next run | B1 asks to remove vtadevbot first if it is there, so adding it announces the connection; BL ends by removing it |
+| [P3] Preserve the gateway's retention settings in the CLI reader | the reader keeps the two `HERMES_TELEGRAM_INBOX_*` overrides the gateway gets |

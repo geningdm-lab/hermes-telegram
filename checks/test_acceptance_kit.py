@@ -174,3 +174,149 @@ def test_a_run_empties_only_a_home_the_kit_made(tmp_path: Path, monkeypatch) -> 
     home._fresh_home()
     assert sorted(p.name for p in ours.iterdir()) == [home._MARK, "logs"]
     assert (ours / "logs" / "gateway.log").read_text() == "kept"
+
+
+def test_the_acceptance_home_keeps_the_owners_business_chats(tmp_path: Path, monkeypatch) -> None:
+    # Rows B1 to BL. Bug: the home without business_inbox, so the run sees an inbox that stores nothing.
+    from ruamel.yaml import YAML
+
+    from acceptance import home
+
+    monkeypatch.setattr(home, "HOME", tmp_path / "hermes")
+    home.prepare(42, provider="anthropic", model="m", api="http://127.0.0.1:1", playbook="# p")
+    config = YAML().load((tmp_path / "hermes" / "config.yaml").read_text())
+    assert config["platforms"]["telegram"]["extra"]["business_inbox"] == {"owners": {"42": "default"}}
+
+
+def test_the_business_rows_flag_any_call_into_the_chat_but_a_connection_lookup() -> None:
+    # B7 live. Bugs: a send into the chat passing because it names no connection; the allowed lookup flagged.
+    from acceptance.recorder import Call
+
+    calls = [Call(0.0, "getBusinessConnection", {"business_connection_id": "bc"}, True),
+             Call(0.0, "sendMessage", {"chat_id": 4242, "text": "hi"}, True),
+             Call(0.0, "readBusinessMessage", {"business_connection_id": "bc", "chat_id": 4242}, True),
+             Call(0.0, "sendMessage", {"chat_id": 42, "text": "the owner's own chat"}, True),
+             Call(0.0, "getUpdates", {}, True)]
+    assert rows.into_business(calls, 4242) == ["sendMessage", "readBusinessMessage"]
+    # Review, slice 3: the rows read the raw record, where typing in the chat is a call like any other.
+    rec = Recorder(Path("unused"), "x")
+    rec.calls = [Call(5.0, "sendChatAction", {"chat_id": 4242, "action": "typing"}, True)]
+    assert rows.into_business(rows._calls(argparse.Namespace(rec=rec), 0.0), 4242) == ["sendChatAction"]
+
+
+async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: Path, monkeypatch) -> None:
+    # Rows B1 to BL offline, before an owner spends a live session on them. Telegram's updates are synthetic and
+    # the inbox is written as the gateway would; the rows read it back with the real `hermes telegram inbox` from
+    # the acceptance home. Bugs: a row waiting for an update shape Telegram does not send; a row reading the
+    # contract's output by a key it does not have.
+    import asyncio
+    import sqlite3
+    import time
+
+    from acceptance import home
+    from acceptance.recorder import Recorder, Update
+    from hermes_telegram.inbox import (ChatId, ConnectionId, ConnectionSeen, InboxStore, Limits, MessageId,
+                                       MessageSeen, MessagesDeleted, OwnerId, STORE_NAME)
+
+    owner, contact, cid = 42, 4242, ConnectionId("bc-live")
+    monkeypatch.setattr(home, "HOME", tmp_path / "hermes")
+    monkeypatch.setattr(rows, "HOME", tmp_path / "hermes")
+    monkeypatch.setattr(rows.secrets, "token_hex", lambda n: "abcd")
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(min(s, 0.05)))
+    home.prepare(owner, provider="anthropic", model="m", api="http://127.0.0.1:1", playbook="# p")
+    with sqlite3.connect(tmp_path / "hermes" / "state.db") as log:  # the agent's log, which no turn wrote to
+        log.execute("CREATE TABLE messages (timestamp REAL, content TEXT)")
+    store, limits = InboxStore(tmp_path / "hermes" / STORE_NAME), Limits(72, 1000)
+    rec = Recorder(tmp_path / "record.jsonl", "x")
+    asked: list[str] = []
+
+    async def yes(question: str) -> bool:
+        asked.append(question)
+        return not question.startswith("BL link 2")  # an honest "no" is a finding, not a failure
+
+    async def nothing(line: str) -> None:
+        say(line)  # B2's instruction comes with a pause: the owner sends, then presses Enter
+
+    steps: list = []
+
+    def say(line: str) -> None:  # the owner does what each instruction says, a moment after reading it
+        if ">>> On iOS" in line:
+            asyncio.get_running_loop().call_later(0.2, steps.pop(0))
+
+    run = rows.Run(rec=rec, owner_id=owner, files={}, gateway=None, ask=yes, pause=nothing, say=say)
+    ids = iter(range(100, 200))
+
+    def telegram(kind: str, body: dict) -> None:
+        rec.updates.append(Update(time.time(), {"update_id": next(ids), kind: body}))
+
+    def message(mid: int, sender: int, text: str, edited: int = 0) -> None:
+        body = {"message_id": mid, "date": int(time.time()), "business_connection_id": cid, "text": text,
+                "chat": {"id": contact, "type": "private", "first_name": "Second"},
+                "from": {"id": sender, "is_bot": False, "first_name": "x", "username": "second_account"}}
+        telegram("edited_business_message" if edited else "business_message", {**body, **({"edit_date": edited}
+                                                                                          if edited else {})})
+        seen = MessageSeen(connection=cid, chat=ChatId(contact), chat_name="Second", message=MessageId(mid),
+                           sender=sender, sender_name="x", via_bot=False, date=body["date"], edited=edited, text=text,
+                           reply_to=None, forwarded=False, offline=False, attachments=(), media_group=None)
+        store.keep_message(seen, OwnerId(owner), limits, None, int(time.time()))
+
+    steps += [
+        lambda: telegram("business_connection", {"id": cid, "user": {"id": owner, "is_bot": False, "first_name": "O"},
+                                                 "user_chat_id": owner, "date": 0, "is_enabled": True,
+                                                 "rights": {"can_reply": True}}),  # B1 asks for it off first
+        lambda: (telegram("business_connection", {"id": cid, "user": {"id": owner, "is_bot": False,
+                                                                       "first_name": "Owner"},
+                                                  "user_chat_id": owner, "date": 0, "is_enabled": True,
+                                                  "rights": {}}),
+                 store.save_connection(ConnectionSeen(cid, OwnerId(owner), True, {}), None, int(time.time()))),
+        lambda: message(7, contact, "b1-abcd are we still on for dinner?"),
+        lambda: message(8, owner, "b2-abcd yes, at 8"),
+        lambda: message(7, contact, "b1-abcd are we still on, at 9?", edited=int(time.time()) + 1),
+        lambda: (telegram("deleted_business_messages", {"business_connection_id": cid, "message_ids": [7],
+                                                         "chat": {"id": contact, "type": "private"}}),
+                 store.mark_deleted(MessagesDeleted(cid, ChatId(contact), (MessageId(7),)), OwnerId(owner),
+                                    limits, None, int(time.time()))),
+        lambda: message(9, contact, "bl-abcd the link test"),
+    ]
+    results = []
+    for key in ("B1", "B2", "B3", "BL"):
+        title, fn = rows.ROWS[key]
+        run.result = rows.Result(key, title)
+        await fn(run)
+        results.append(run.result)
+    assert steps == []
+    failed = [(r.row, what, detail) for r in results for what, ok, detail in r.checks if not ok]
+    assert failed == []
+    outcomes = next(detail for r in results for what, _, detail in r.checks if what.startswith("the link"))
+    assert outcomes == ("the contract's: opens the message; openmessage: does not; resolve: opens the message; "
+                        "t.me: opens the message")  # the username's forms are offered too
+    assert all(r.passed for r in results)
+    assert not any("4242" in q or "second_account" in q for q in asked)  # no ids in what the report keeps
+
+
+def test_the_agent_log_check_tells_no_log_from_a_log_without_the_text(tmp_path: Path, monkeypatch) -> None:
+    # Review, slice 3. Bug: "no agent turn saw it" passing because the agent's log is missing.
+    import sqlite3
+
+    monkeypatch.setattr(rows, "HOME", tmp_path)
+    assert rows._agent_saw("b1-abcd", 0.0) is None
+    with sqlite3.connect(tmp_path / "state.db") as log:
+        log.execute("CREATE TABLE messages (timestamp REAL, content TEXT)")
+        log.execute("INSERT INTO messages VALUES (10.0, 'user: b1-abcd are we still on?')")
+    assert (rows._agent_saw("b1-abcd", 5.0), rows._agent_saw("b1-abcd", 20.0)) == (True, False)
+
+
+async def test_without_an_agent_log_the_row_does_not_certify_that_no_turn_saw_it(tmp_path: Path, monkeypatch) -> None:
+    # Review, slice 3. Bug: the missing log read as "nobody saw it".
+    from acceptance.recorder import Recorder
+
+    monkeypatch.setattr(rows, "HOME", tmp_path)
+    monkeypatch.setattr(rows, "QUIET", 0.01)
+    run = rows.Run(rec=Recorder(tmp_path / "record.jsonl", "x"), owner_id=42, files={}, gateway=None, ask=None,
+                   pause=None, say=lambda _: None)
+    run.result = rows.Result("B1", "t")
+    await rows._nothing_happened(run, 0.0, 4242, ["b1-abcd"])
+    assert [(what, ok, detail) for what, ok, detail in run.result.checks] == [
+        ("the bot did nothing in the chat", True, "[]"),
+        ("no agent turn saw it", False, "the acceptance home has no agent log to look in")]
