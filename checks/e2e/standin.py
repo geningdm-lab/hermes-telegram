@@ -393,14 +393,14 @@ class MediaTelegramStandin(RichTelegramStandin):
         self._push(update)
         return update
 
-    def business_message(self, connection_id: str, contact_id: int, sender_id: int, text: str, *,
-                         edit_of: int | None = None) -> dict[str, Any]:
+    def business_message(self, connection_id: str, contact_id: int, sender_id: int, text: str | None = None, *,
+                         edit_of: int | None = None, **fields: Any) -> dict[str, Any]:
         """A message in the owner's private chat with ``contact_id``, written by ``sender_id`` (the owner or the
-        contact); ``edit_of`` makes it the new version of that message."""
+        contact); ``edit_of`` makes it the new version of that message; ``fields`` adds a photo, a caption."""
         message = {"message_id": edit_of or next(self._inbound_ids), "date": int(time.time()),
-                   "business_connection_id": connection_id, "text": text,
+                   "business_connection_id": connection_id, **({"text": text} if text is not None else {}),
                    "chat": {"id": int(contact_id), "type": "private", "first_name": "Contact"},
-                   "from": self._user(sender_id, "Owner" if sender_id != contact_id else "Contact")}
+                   "from": self._user(sender_id, "Owner" if sender_id != contact_id else "Contact"), **fields}
         if edit_of:
             message["edit_date"] = int(time.time())
         update = {"update_id": next(self._update_ids),
