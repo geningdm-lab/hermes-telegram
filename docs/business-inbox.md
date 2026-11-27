@@ -1,6 +1,6 @@
 # Design: Business inbox
 
-Status: draft for owner review. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
+Status: design approved (PR #15, 2026-11-27); slice 1 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
 
 ## Why
 
@@ -80,7 +80,7 @@ Terms:
 
 States of a record: `present`, then any number of edits, then possibly `deleted`, then `purged`. `purged` means the row is gone; it is the only terminal state. A deleted record keeps its text until it is purged (owner decision 6). A deletion for a message the base never had is ignored. An edit of a message the base does not hold is stored as a new record if it is within retention.
 
-States of a connection: `enabled`, `disabled`, or `ignored` when its owner is not in config. A disabled connection stores nothing new; its records expire on the normal schedule. A message whose connection is unknown (an update missed while the gateway was down) is resolved with one `getBusinessConnection` call; if that fails, the message is not stored, and the failure is counted, without ids or text.
+States of a connection: `enabled`, `disabled`, or `ignored` when its owner is not in config. A disabled connection stores nothing new; its records expire on the normal schedule. A message whose connection is unknown is resolved with one `getBusinessConnection` call; if that fails, the message is not stored, and the failure is counted, without ids or text. This happens after an update missed while the gateway was down, and also in normal running: updates of different chats run concurrently (`PerChatUpdateProcessor`, `harvested/update_admission.py`), and a connection update has no chat, so a message can be handled before it (found by the end-to-end check). A connection whose owner is not configured is remembered in memory only, so the file holds nothing of it and Telegram is asked once per process.
 
 Change sequence: every insert, edit and deletion gets the next number of one per-store sequence. Readers follow it with a cursor.
 
@@ -88,19 +88,20 @@ One writer of records: the adapter in the gateway process. The CLI only reads, e
 
 ## Intake
 
-- A handler in group -10, ahead of the plugin's other handlers and the harvested ones, takes every update with one of the four business fields and stops it there (`ApplicationHandlerStop`). If Hermes ever stopped dropping business updates, they would still reach no agent.
-- Each update is written in one transaction. The same update twice is a no-op: the record's identity and the version's `edit_date` are unique.
+- A handler in group -20, ahead of the plugin's other handlers and the harvested ones, takes every update with one of the four business fields and stops it there (`ApplicationHandlerStop`). Group -10 is the Stop button's `TypeHandler(Update)` (`preview.py`), which would match first in a shared group. If Hermes ever stopped dropping business updates, they would still reach no agent. Without a usable `business_inbox` the handler still stops them and keeps nothing.
+- Each update is written in one transaction. The same update twice is a no-op: the record's identity and the version's `edit_date` are unique. This is the only deduplication that holds across restarts: the harvested admission writes a receipt only for updates a core handler or another plugin served, so a business update, served by the adapter's own handler outside group 0, is not receipted and may be delivered again after a restart.
+- A record keeps at most 50 versions: the first and the newest edits, so a burst of edits cannot grow it without limit.
 - Only private chats are kept. A business update for any other chat type is dropped.
-- A record holds: author, sender's display name, date, text or caption, the record it replies to, whether it was forwarded, `offline`, and for each attachment its kind, MIME type, size, file name, duration, width and height. Not `file_id` (open question 2).
+- A record holds: author, sender's display name, date, text or caption, the record it replies to, whether it was forwarded, `offline`, and for each attachment its kind, MIME type, size, file name, duration, width and height (a photo's largest size). Not `file_id` (open question 2). A contact, location, venue, poll, dice and the like keep their kind only: a phone number or a place is content, not metadata of a file. A message a bot sent on the owner's behalf (`sender_business_bot`) is the owner's.
 - Nothing on this path calls a Bot API method except `getBusinessConnection`. No send, edit, read mark or deletion, also not when `can_reply` is on; `status` shows the rights so the owner can turn them off.
 - Business updates never reach `handle_message`, so authorization, pairing, `profile_routes` and the existing routes are untouched. The inbox routes by connection owner, which is new; it does not change how anything else is routed.
 - Logs count updates per kind and outcome. They carry no text, names or contact ids.
 
 ## Storage and retention
 
-- One SQLite file, `telegram_business_inbox.sqlite3`, in the Hermes home of the profile the owner maps to, mode 0600. In this version that must be the adapter's own profile, `default`; a mapping to any other profile is a configuration error at start.
+- One SQLite file, `telegram_business_inbox.sqlite3`, in the Hermes home of the profile the owner maps to, mode 0600. In this version that must be the adapter's own profile, `default`; a mapping to any other profile, like any unusable setting, is refused when the adapter connects: the inbox stays off and the gateway log says why.
 - `retention_hours` (default 72) counts from the message's Telegram date, not from when it arrived. `max_messages_per_chat` (default 1000) counts records, not versions; the 1001st record of a chat purges that chat's oldest.
-- A purge runs on every write, before every CLI command answers, and every 10 minutes while the gateway runs. `hermes telegram inbox purge` lets the host run it on a timer when the gateway is down.
+- A purge runs with every message kept, before every CLI command answers, and every 10 minutes while the gateway runs. `hermes telegram inbox purge` lets the host run it on a timer when the gateway is down.
 - Purged rows must not linger in the file: `secure_delete` is on and the journal is not left in WAL. Backups of the host volume are outside this plugin; a backup taken while records exist keeps them past 72 hours.
 - Settings live in the platform's `extra` as `business_inbox: {owners: {<user id>: <profile>}, retention_hours, max_messages_per_chat}`; `HERMES_TELEGRAM_INBOX_RETENTION_HOURS` and `HERMES_TELEGRAM_INBOX_MAX_PER_CHAT` override the two limits. Owner ids come from homelab's configuration; this public repository holds none.
 
@@ -124,7 +125,7 @@ A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, 
 
 Each slice is one pull request to `main`, reviewed by the owner.
 
-1. Intake and storage: B1, B3 to B7, B9, B10. The Bot API stand-in learns to deliver the four business updates and to answer `getBusinessConnection`. The slice first proves on the pin that the group -10 handler sees business updates after the harvested admission, which deduplicates updates across restarts (`harvested/update_admission.py`), and that no other handler sees them.
+1. Intake and storage: B1, B3 to B7, B9, B10. The Bot API stand-in learns to deliver the four business updates and to answer `getBusinessConnection`. Proved on the pin: the group -20 handler sees business updates through the harvested `TelegramApplication`, and no later group, and no agent, sees them (`checks/test_business_inbox.py`, `checks/e2e/test_business_inbox.py`). Built in `hermes_telegram/inbox.py`.
 2. Read contract: B8. It first proves that `hermes telegram` registers from this plugin on the pin.
 3. Live acceptance of B1 to B3 on `vtadevbot`, and the link test.
 
