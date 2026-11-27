@@ -665,32 +665,116 @@ class InboxStore:
             db.execute("DELETE FROM chats WHERE NOT EXISTS (SELECT 1 FROM records WHERE records.owner = "
                        "chats.owner AND records.chat = chats.chat)")
 
-    # --- reading -----------------------------------------------------------------------------------------
+    # --- reading: each call reads one snapshot ----------------------------------------------------------
+
+    def _snapshot(self) -> Optional[sqlite3.Connection]:
+        """A connection inside a read transaction, or None when there is no file; the caller closes it."""
+        db = self._open(create=False)
+        if db is not None:
+            db.execute("BEGIN")
+        return db
+
+    @staticmethod
+    def _build(db: sqlite3.Connection, rows: list[tuple]) -> list[Record]:
+        records = []
+        for o, c, m, d, a, n, r, f, off, media, g, dl in rows:
+            versions = tuple(Version(e, x) for e, x in db.execute(
+                f"SELECT edited, text FROM versions WHERE {_RECORD} ORDER BY edited, rowid", (o, c, m)))
+            records.append(Record(owner=OwnerId(o), chat=ChatId(c), message=MessageId(m), date=d, author=Author(a),
+                                  name=n, reply_to=MessageId(r) if r is not None else None, forwarded=bool(f),
+                                  offline=bool(off), media=tuple(Attachment(**x) for x in json.loads(media)),
+                                  media_group=g, deleted=dl, versions=versions))
+        return records
+
+    _COLUMNS = ("SELECT owner, chat, message, date, author, name, reply_to, forwarded, offline, media, media_group, "
+                "deleted FROM records")
 
     def records(self) -> list[Record]:
-        """Every record, per chat in Telegram's order (date, then message id), from one snapshot."""
-        db = self._open(create=False)
+        """Every record, per chat in Telegram's order (date, then message id)."""
+        db = self._snapshot()
         if db is None:
             return []
         try:
-            db.execute("BEGIN")
-            rows = db.execute("SELECT owner, chat, message, date, author, name, reply_to, forwarded, offline, media, "
-                              "media_group, deleted FROM records ORDER BY owner, chat, date, message").fetchall()
-            versions: dict[Key, list[Version]] = {}
-            for o, c, m, edited, text in db.execute("SELECT owner, chat, message, edited, text FROM versions "
-                                                    "ORDER BY edited, rowid"):
-                versions.setdefault((o, c, m), []).append(Version(edited, text))
-            db.execute("COMMIT")
+            return self._build(db, db.execute(f"{self._COLUMNS} ORDER BY owner, chat, date, message").fetchall())
         finally:
             db.close()
-        return [Record(owner=OwnerId(o), chat=ChatId(c), message=MessageId(m), date=d, author=Author(a), name=n,
-                       reply_to=MessageId(r) if r is not None else None, forwarded=bool(f), offline=bool(off),
-                       media=tuple(Attachment(**x) for x in json.loads(media)), media_group=g, deleted=dl,
-                       versions=tuple(versions.get((o, c, m), ())))
-                for o, c, m, d, a, n, r, f, off, media, g, dl in rows]
+
+    def record(self, owner: OwnerId, chat: ChatId, message: MessageId) -> Optional[Record]:
+        db = self._snapshot()
+        if db is None:
+            return None
+        try:
+            found = self._build(db, db.execute(f"{self._COLUMNS} WHERE {_RECORD}", (owner, chat, message)).fetchall())
+        finally:
+            db.close()
+        return found[0] if found else None
+
+    def window(self, owner: OwnerId, chat: ChatId, before: Optional[tuple[int, int]],
+               limit: int) -> tuple[list[Record], bool]:
+        """The newest ``limit`` records of one chat before ``(date, message)``, oldest first, and whether older
+        ones remain."""
+        db = self._snapshot()
+        if db is None:
+            return [], False
+        try:
+            where, args = "owner = ? AND chat = ?", [owner, chat]
+            if before is not None:
+                where += " AND (date, message) < (?, ?)"
+                args += list(before)
+            rows = db.execute(f"{self._COLUMNS} WHERE {where} ORDER BY date DESC, message DESC LIMIT ?",
+                              (*args, limit + 1)).fetchall()
+            return self._build(db, list(reversed(rows[:limit]))), len(rows) > limit
+        finally:
+            db.close()
+
+    def changes_since(self, since: int, limit: int) -> tuple[list[tuple[int, Change, int, Record]], bool, int]:
+        """Changes after ``since`` in order, each with its record as it is now; whether more remain; and the
+        highest change that may be gone (``removed_through``)."""
+        db = self._snapshot()
+        if db is None:
+            return [], False, 0
+        try:
+            rows = db.execute("SELECT seq, kind, at, owner, chat, message FROM changes WHERE seq > ? ORDER BY seq "
+                              "LIMIT ?", (since, limit + 1)).fetchall()
+            items = []
+            for seq, kind, at, o, c, m in rows[:limit]:
+                [record] = self._build(db, db.execute(f"{self._COLUMNS} WHERE {_RECORD}", (o, c, m)).fetchall())
+                items.append((seq, Change(kind), at, record))
+            removed = db.execute("SELECT value FROM meta WHERE key = 'removed_through'").fetchone()
+            return items, len(rows) > limit, int(removed[0]) if removed else 0
+        finally:
+            db.close()
+
+    def chats(self) -> list[tuple[OwnerId, ChatId, str, int, int]]:
+        """Each chat: owner, chat, the other person's name, the last record's date and the record count."""
+        db = self._snapshot()
+        if db is None:
+            return []
+        try:
+            rows = db.execute("SELECT c.owner, c.chat, c.name, MAX(r.date), COUNT(r.message) FROM chats c JOIN "
+                              "records r ON r.owner = c.owner AND r.chat = c.chat GROUP BY c.owner, c.chat "
+                              "ORDER BY MAX(r.date) DESC, c.chat").fetchall()
+        finally:
+            db.close()
+        return [(OwnerId(o), ChatId(c), n, d, k) for o, c, n, d, k in rows]
+
+    def status(self) -> "StoreStatus":
+        db = self._snapshot()
+        if db is None:
+            return StoreStatus(connections=(), records=0, chats=0, oldest=None, limits=None)
+        try:
+            connections = tuple((ConnectionId(i), OwnerId(o), bool(e), json.loads(r)) for i, o, e, r in db.execute(
+                "SELECT id, owner, enabled, rights FROM connections ORDER BY updated, id"))
+            records, oldest = db.execute("SELECT COUNT(*), MIN(date) FROM records").fetchone()
+            chats = db.execute("SELECT COUNT(*) FROM (SELECT DISTINCT owner, chat FROM records)").fetchone()[0]
+            recorded = db.execute("SELECT COUNT(*) FROM meta WHERE key IN ('retention_hours', 'max_per_chat')")
+            limits = self._recorded_limits(db) if recorded.fetchone()[0] == 2 else None
+        finally:
+            db.close()
+        return StoreStatus(connections=connections, records=records, chats=chats, oldest=oldest, limits=limits)
 
     def changes(self) -> list[tuple[int, Change, OwnerId, ChatId, MessageId]]:
-        db = self._open(create=False)
+        db = self._snapshot()
         if db is None:
             return []
         try:
@@ -700,24 +784,19 @@ class InboxStore:
         return [(s, Change(k), OwnerId(o), ChatId(c), MessageId(m)) for s, k, o, c, m in rows]
 
     def removed_through(self) -> int:
-        db = self._open(create=False)
-        if db is None:
-            return 0
-        try:
-            row = db.execute("SELECT value FROM meta WHERE key = 'removed_through'").fetchone()
-        finally:
-            db.close()
-        return int(row[0]) if row else 0
+        return self.changes_since(2**62, 1)[2]
 
     def rights(self, connection: ConnectionId) -> dict[str, bool]:
-        db = self._open(create=False)
-        if db is None:
-            return {}
-        try:
-            row = db.execute("SELECT rights FROM connections WHERE id = ?", (connection,)).fetchone()
-        finally:
-            db.close()
-        return json.loads(row[0]) if row else {}
+        return next((r for i, _o, _e, r in self.status().connections if i == connection), {})
+
+
+@dataclass(frozen=True)
+class StoreStatus:
+    connections: tuple[tuple[ConnectionId, OwnerId, bool, dict[str, bool]], ...]
+    records: int
+    chats: int
+    oldest: Optional[int]
+    limits: Optional[Limits]  # the limits the file was last written under
 
 
 # --- the adapter ------------------------------------------------------------------------------------------

@@ -48,6 +48,9 @@ class _Ctx:
     def register_tool(self, **kwargs: Any) -> None:
         self.tools[kwargs["name"]] = kwargs
 
+    def register_cli_command(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.cli_commands = [*getattr(self, "cli_commands", []), name]
+
 
 def _registered(register_fn) -> dict[str, Any]:
     ctx = _Ctx()

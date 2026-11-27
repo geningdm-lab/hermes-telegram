@@ -1,6 +1,6 @@
 # Design: Business inbox
 
-Status: design approved (PR #15, 2026-11-27); slice 1 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
+Status: design approved (PR #15, 2026-11-27); slice 1 built (PR #16), slice 2 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
 
 ## Why
 
@@ -111,13 +111,17 @@ One writer of records: the adapter in the gateway process. The CLI only reads, e
 
 | Command | Prints |
 |---|---|
-| `status` | Connections (owner, enabled, rights), record and chat counts, the oldest record's age, the limits in effect. No content |
-| `chats` | Each chat with a reference, the other person's display name, the last message's date and the record count |
-| `changes --since <cursor> [--limit N]` | Inserts, edits and deletions after the cursor, in order, and `next_cursor`. `gap: true` when a purge removed changes the caller has not read |
-| `window --chat <ref> [--before <ref>] [--limit N]` | Records of one chat, oldest first |
-| `purge` | What it removed, as counts |
+| `status` | `intake` (`on` or `off`, with `intake_error` when settings were refused), `limits` with their `source` (`config`, `recorded` in the file, or `default`), `connections` (connection, owner, enabled, rights), `records`, `chats`, `oldest_record_age_secs`. No content |
+| `chats` | `chats`: each with `chat` (its ref), `name` (the other person's), `last_date` and `records`, the most recent first |
+| `changes [--since <cursor>] [--limit N]` | `changes`: inserts, edits and deletions after the cursor, in order, each with its `cursor`, `kind`, `at` and the `record` as it is now; `next_cursor`; `more` when the limit cut the list; `gap: true` when a purge removed changes after the caller's cursor. A reader that passes `next_cursor` back is told of a gap once |
+| `window --chat <ref> [--before <ref>] [--limit N]` | `records` of one chat, the newest `N` before the given record, oldest first; `more` when older ones remain |
+| `purge` | `removed`: how many records it removed |
 
-A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, `date` (UTC, ISO 8601), `text`, `reply_to`, `forwarded`, `offline`, `media`, `versions`, `deleted` and `link`.
+`--limit` defaults to 100 and takes at most 1000. A cursor is a string of digits, from `next_cursor`; without `--since` the changes start from the first one kept.
+
+A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, `date` (UTC, ISO 8601), `text` (the newest version's), `reply_to` (a ref, or null), `forwarded`, `offline`, `media`, `versions` (each with `edited`, null for the first, and `text`), `deleted` (when the inbox learned of it, or null) and `link`.
+
+An argument outside the contract prints `{"contract_version": 1, "error": {"code", "message"}}` and exits 2: `bad_cursor`, `bad_limit`, `bad_ref`, `unknown_ref` (a `--before` record the inbox does not hold, perhaps expired) or `bad_command`. A file this version cannot use prints the same with `store` and exits 1. Refs are built by the plugin and parsed only by it; a reader passes them back as given.
 
 `link` is `{kind, url}`. `kind` is `exact` for a link to the message itself, `chat` for one to the other person (the Bot API's mention link, `tg://user?id=<id>`), or `none`. No exact form is documented for private chats, so this version gives `chat`. A candidate for `exact` is `tg://resolve?domain=<username>&post=<message_id>`: Telegram Desktop's `resolve` handler parses `post` whatever kind of peer the username names (`Telegram/SourceFiles/core/local_url_handlers.cpp`, tdesktop `master` read 2026-11-27). Whether it then opens a message in a private chat, on Desktop or on iOS, is unknown, and it needs the other person to have a username. The base keeps the ids a link is built from, so a form that passes a live test changes only how the link is built.
 
@@ -126,7 +130,7 @@ A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, 
 Each slice is one pull request to `main`, reviewed by the owner.
 
 1. Intake and storage: B1, B3 to B7, B9, B10. The Bot API stand-in learns to deliver the four business updates and to answer `getBusinessConnection`. Proved on the pin: the group -20 handler sees business updates through the harvested `TelegramApplication`, and no later group, and no agent, sees them (`checks/test_business_inbox.py`, `checks/e2e/test_business_inbox.py`). Built in `hermes_telegram/inbox.py`.
-2. Read contract: B8. It first proves that `hermes telegram` registers from this plugin on the pin.
+2. Read contract: B8. Proved on the pin: `hermes telegram` registers from this plugin, which `register` adds with `ctx.register_cli_command`, and reads the profile's own `extra` through `load_gateway_config` (`checks/test_business_inbox_cli.py` runs the real `hermes` executable on a throwaway home). Built in `hermes_telegram/inbox_cli.py`.
 3. Live acceptance of B1 to B3 on `vtadevbot`, and the link test.
 
 ## Decisions and open questions
