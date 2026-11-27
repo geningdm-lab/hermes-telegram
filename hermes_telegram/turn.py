@@ -13,9 +13,9 @@ docs/design.md (Agent interface, Tools) sets three guards, which every tool here
 ``Turn`` is what a tool reads from Hermes' session context (``gateway/session_context.py``) on its own
 thread; ``AdmittedTurn`` is the adapter's record, read on the gateway loop. Sends use the record's routing
 metadata, built by Hermes' own ``_thread_metadata_for_event``. A tool's send keeps the turn's topic: while
-``TOOL_SEND`` is set, the fallbacks that ordinary delivery has (a media send retried without its topic when
-the reply anchor or the topic is gone, a text sent to the root chat when its forum topic is not found) do
-not apply, and the send fails instead.
+``TOOL_SEND`` is set, the fallbacks that ordinary delivery has when the topic is gone (a text, a media send,
+an album or one of Hermes' prompts sent to the root chat instead) do not apply, and the send fails instead.
+A deleted reply anchor is dropped as in ordinary delivery: that retry stays in the topic.
 
 Reaching the live adapter follows Hermes' own send tool (``tools/send_message_senders.py:_live_adapter``):
 the gateway runner, then the adapter of the active profile, which under ``multiplex_profiles`` is the
@@ -28,13 +28,17 @@ import contextvars
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, Optional, TypeVar
 
 MAX_SENDS_PER_TURN = 10
 # Turns being processed at once, far above any real number; past it the oldest record is dropped.
 _TURN_MEMORY = 4096
 
 T = TypeVar("T")
+
+# The refusal a tool's text gets when its topic is gone. It names no topic marker that the harvested chunk
+# loop reroutes on (``telegram_dm_topic_send.topic_gone``) or drops the reply anchor for.
+TOPIC_GONE = "the topic of this turn no longer takes messages, and nothing was sent outside it"
 
 # Set while a tool's own sends run on the gateway loop (``as_tool_send``).
 TOOL_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar("hermes_telegram_tool_send", default=False)
@@ -115,6 +119,10 @@ class AdmittedTurn:
         self.sent = max(0, self.sent - count)
 
 
+def _routed_to_topic(send_kwargs: dict[str, Any]) -> bool:
+    return bool(send_kwargs.get("message_thread_id") or send_kwargs.get("direct_messages_topic_id"))
+
+
 def _event_key(chat_id: Any, message_id: Any) -> tuple[str, str]:
     return str(chat_id), str(message_id)
 
@@ -152,20 +160,41 @@ class HumanTurnsMixin:
             self._human_turns().pop(_event_key(source.chat_id, message_id), None)
         await super().on_processing_complete(event, outcome)
 
-    @classmethod
-    def _should_retry_without_dm_topic_reply_anchor(cls, error: Exception, metadata: Any,
-                                                    reply_to_message_id: Any) -> bool:
-        if TOOL_SEND.get():
-            return False  # a tool's send fails rather than leave the turn's topic
-        return super()._should_retry_without_dm_topic_reply_anchor(error, metadata, reply_to_message_id)
-
     @staticmethod
     def _is_thread_not_found_error(error: Exception) -> bool:
-        """Under ``TOOL_SEND`` a missing topic is an ordinary refusal: ``send`` then fails instead of
-        retrying in the root chat."""
+        """Under ``TOOL_SEND`` a missing topic is an ordinary refusal: Hermes' prompts and albums, which
+        decide by this, then fail instead of retrying in the root chat."""
         from .harvested.adapter_core import CoreMixin
 
         return not TOOL_SEND.get() and CoreMixin._is_thread_not_found_error(error)
+
+    async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: dict[str, Any]) -> Any:
+        """Under ``TOOL_SEND`` a text whose topic is gone fails. The harvested chunk loop reroutes a text whose
+        topic Telegram no longer has (``telegram_dm_topic_send.topic_gone``) to the root chat; the refusal it is
+        given instead names no topic, so it ends the send as any other refusal does."""
+        try:
+            return await super()._send_chunk_markdown_or_plain(chunk, send_kwargs)
+        except Exception as exc:
+            if not (TOOL_SEND.get() and _routed_to_topic(send_kwargs) and self._is_bad_request_error(exc)):
+                raise
+            from telegram.error import BadRequest
+
+            from .harvested.telegram_dm_topic_send import topic_gone
+
+            if topic_gone(send_kwargs.get("chat_id"), exc):
+                raise BadRequest(TOPIC_GONE) from exc
+            raise
+
+    async def _send_with_dm_topic_reply_anchor_retry(self, send_fn: Any, send_kwargs: dict[str, Any],
+                                                     metadata: Optional[dict[str, Any]], *args: Any,
+                                                     **kwargs: Any) -> Any:
+        """Under ``TOOL_SEND`` a media send whose private-chat topic is gone fails. The harvested retry
+        reroutes it to the chat root unless the send is marked for a named topic
+        (``telegram_dm_topic_created_for_send``, read there only by ``dead_topic_may_reroute``); a tool's
+        send is marked so. A deleted reply anchor is still dropped: that retry keeps the topic."""
+        if TOOL_SEND.get():
+            metadata = {**(metadata or {}), "telegram_dm_topic_created_for_send": True}
+        return await super()._send_with_dm_topic_reply_anchor_retry(send_fn, send_kwargs, metadata, *args, **kwargs)
 
     def admitted_turn(self, turn: Turn) -> AdmittedTurn:
         """The record of the human event ``turn`` runs for, or ``TurnRefused``. On the gateway loop."""

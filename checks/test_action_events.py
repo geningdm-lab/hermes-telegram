@@ -217,17 +217,27 @@ def _topic_metadata(adapter) -> dict[str, Any]:
 
 
 async def test_a_tools_poll_fails_rather_than_leave_the_turns_topic(adapter):
-    # Review slice 4, P1: the user deleted the message the poll replies to. Ordinary delivery retries in the
-    # root chat; a tool's send must not, or the poll shows outside the topic it was recorded for.
+    # Review slice 4, P1: the user deleted the topic the poll goes to. Ordinary delivery retries in the root
+    # chat; a tool's send must not, or the poll shows outside the topic it was recorded for.
     metadata = _topic_metadata(adapter)
-    gone = BadRequest("Message to be replied not found")
-    adapter.bot_stub.fail["sendPoll"] = [gone]
+    gone = BadRequest("Message thread not found")
+    adapter.bot_stub.fail["sendPoll"] = [gone, gone]
     result = await as_tool_send(lambda: adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata))
     assert not result.success and len(adapter.bot_stub.of("sendPoll")) == 1
-    adapter.bot_stub.fail["sendPoll"] = [gone]
-    await adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata)  # not a tool's: retried
-    retried = adapter.bot_stub.of("sendPoll")[-1]
-    assert len(adapter.bot_stub.of("sendPoll")) == 3 and "message_thread_id" not in retried
+    adapter.bot_stub.fail["sendPoll"] = [gone, gone]
+    await adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata)  # not a tool's: the same topic, then root
+    tries = adapter.bot_stub.of("sendPoll")[1:]
+    assert [k.get("message_thread_id") for k in tries] == [7, 7, None]
+
+
+async def test_a_tools_poll_whose_reply_anchor_is_gone_stays_in_the_turns_topic(adapter):
+    # Hermes drops a deleted reply anchor and keeps the topic (hermes-agent#136808), for a tool's send too.
+    metadata = _topic_metadata(adapter)
+    adapter.bot_stub.fail["sendPoll"] = [BadRequest("Message to be replied not found")]
+    result = await as_tool_send(lambda: adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata))
+    first, retried = adapter.bot_stub.of("sendPoll")
+    assert result.success and first.get("reply_to_message_id") is not None
+    assert retried.get("reply_to_message_id") is None and retried.get("message_thread_id") == 7
 
 
 async def test_a_tools_notice_fails_rather_than_leave_a_forum_topic(adapter):

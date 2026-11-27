@@ -181,12 +181,18 @@ class FilesMixin:
             raise
 
     async def _send_local_file(self, label: str, path: str, chat_id: Any, reply_to: Any, metadata: Any,
-                               media_key: str, build_kwargs: Any, on_error: Any) -> SendResult:
+                               media_key: str, build_kwargs: Any, on_error: Any, redo: Any = None,
+                               source: Optional[str] = None) -> SendResult:
         result = await super()._send_local_file(label, path, chat_id, reply_to, metadata, media_key, build_kwargs,
-                                                on_error)
+                                                on_error, redo, source)
         if not result.success and not os.path.exists(path) and path not in self._notified():
             # The harvested shell returns this without calling on_error: nobody would name the file.
             return await self._not_delivered(chat_id, path, GONE, metadata)
+        raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+        if result.success and raw.get("ambiguous") and path not in self._notified():
+            # The harvested shell counts an upload whose reply was lost as sent, without a message id and
+            # without on_error (it may be in the chat). The chat is told, as for an album, and nothing resends it.
+            return await self._not_delivered(chat_id, path, LOST_REPLY, metadata)
         return result
 
     # --- senders -----------------------------------------------------------------------------------------
@@ -316,8 +322,8 @@ class FilesMixin:
                 try:
                     with _upload_scope():
                         messages = await self._send_with_dm_topic_reply_anchor_retry(
-                            self._bot.send_media_group, {**kwargs, "media": media}, metadata, reply_to_id,
-                            "media group", reset_media=rewind)
+                            self._bot.send_media_group, {**kwargs, "media": media}, metadata, "media group",
+                            reset_media=rewind)
                 except Exception as exc:
                     receipts.update(await self._album_failed(chat_id, prepared, exc, metadata, charge))
                 else:

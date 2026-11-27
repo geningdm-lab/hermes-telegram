@@ -1,7 +1,7 @@
 """The Telegram adapter this plugin registers in place of the bundled one.
 
 It is composed from the bundled adapter's methods, harvested into one mixin per concern
-(``harvested/adapter_*.py``), on the same bases the bundled ``TelegramAdapter`` had. Behaviour that this
+(``harvested/adapter_*.py``), on the harvested copies of the bases the bundled ``TelegramAdapter`` has. Behaviour that this
 plugin changes goes into its own mixins, listed before the harvested ones so they override them:
 
 - ``RichAnswersMixin`` (slice 1): answers as Telegram rich messages, long ones cut into several.
@@ -32,8 +32,15 @@ from .harvested.adapter_pacing import PacingMixin
 from .harvested.adapter_prompts import PromptsMixin
 from .harvested.adapter_topics import TopicsMixin
 from .harvested.adapter_transport import TransportMixin
+from .harvested.telegram_flood_cooldown import TelegramFloodCooldownMixin
 from .harvested.telegram_held_inbound import TelegramHeldInboundMixin
+from .harvested.telegram_ingress import TelegramContactMixin
+from .harvested.telegram_media_flood import TelegramMediaFloodMixin
+from .harvested.telegram_polling_probe import TelegramPendingProbeMixin
+from .harvested.telegram_replacement import TelegramReplacementMixin
+from .harvested.telegram_send_path_recovery import TelegramSendPathRecoveryMixin
 from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
+from .harvested.telegram_vault_code import TelegramVaultCodeMixin
 from .messages import MessagesMixin
 from .turn import HumanTurnsMixin
 from .preview import PreviewMixin
@@ -63,9 +70,16 @@ class HermesTelegramAdapter(
     GroupsMixin,
     InboundMixin,
     OutboundLegacyMixin,
-    # The bundled TelegramAdapter's own bases, in its order.
+    # The bundled TelegramAdapter's own bases, in its order (scripts/harvest.py BASES).
+    TelegramContactMixin,
     TelegramHeldInboundMixin,
+    TelegramReplacementMixin,
     TelegramTopicRoutingMixin,
+    TelegramPendingProbeMixin,
+    TelegramMediaFloodMixin,
+    TelegramSendPathRecoveryMixin,
+    TelegramVaultCodeMixin,
+    TelegramFloodCooldownMixin,
     BasePlatformAdapter,
 ):
     """Telegram bot adapter: the bundled adapter's transport and routing, with this plugin's answers."""

@@ -40,7 +40,7 @@ Live acceptance, 2026-11-26 (`acceptance/`, reports outside Git): rows 1 to 11 a
 
 ## What exists today
 
-Verified in the source of the pinned Hermes, `NousResearch/hermes-agent@c419cf7`, which `homelab/nix/flake.lock` deploys:
+Verified in the source of `NousResearch/hermes-agent@c419cf7`, the Hermes this design started from and the one `homelab/nix/flake.lock` deployed then. The plugin now targets `28ef6e4` (Hermes upgrades, below); line numbers in this document are those of `c419cf7` unless they name another commit:
 
 - The Telegram adapter is itself a bundled plugin, `plugins/platforms/telegram/`: 14 files, 8692 lines, 7380 of them in `adapter.py`. It is built on python-telegram-bot 22.8 (`uv.lock:5597`).
 - Its prompt hint tells the agent "no tables" and describes only Markdown, `MEDIA:` and `[[audio_as_voice]]` (`plugins/platforms/telegram/adapter_hint.py:8`).
@@ -92,8 +92,9 @@ We do not copy the bundled adapter whole. Its transport, authorization and routi
 How slice 0 did it:
 
 - `scripts/harvest.py` generates `hermes_telegram/harvested/` from the pinned source and is the only writer of that directory. Sibling modules are copied whole. The `TelegramAdapter` class (6697 lines, 344 methods) is split into ten mixins, one per concern: core, access, topics, transport, events, prompts, pacing, groups, inbound, and outbound_legacy. Each method lands in exactly one mixin, with its body unchanged.
-- The only rewrites are mechanical, and each file's header lists them. Sibling imports become relative. Four references to the class name point at the owning mixin. One `sys.path.insert` is dropped: upstream it added the repository root to the path, but from a user plugin directory it would add `$HERMES_HOME/plugins`.
-- `HermesTelegramAdapter` composes the mixins on the bundled class's own bases. Its members equal the upstream class's one for one. `checks/test_harvest.py` compares every member and module with the installed Hermes by AST.
+- The only rewrites are mechanical, and each file's header lists them. Sibling imports become relative. References to the class name inside its methods point at the owning mixin. At `c419cf7` one `sys.path.insert` was dropped: upstream it added the repository root to the path, but from a user plugin directory it would add `$HERMES_HOME/plugins`. Upstream removed it by `28ef6e4`, and the harvest stops if it comes back.
+- Since `28ef6e4` the sibling modules import from `adapter.py` itself. A name of its module-level code comes from `adapter_module`, `from plugins.platforms.telegram import x` becomes `from . import x`, and the class `TelegramAdapter` is the composed `HermesTelegramAdapter`, which has every member of the upstream class.
+- `HermesTelegramAdapter` composes the mixins on the harvested copies of the bundled class's own bases (ten at `28ef6e4`: send paths such as `_send_media` and the flood windows live in them now). Its members equal the upstream class's one for one. `checks/test_harvest.py` compares every member and module with the installed Hermes by AST, and checks that the plugin overrides only the members it lists, the bases' included.
 - On a re-harvest after a Hermes upgrade, a method the map does not name stops the run, so a change upstream is assigned deliberately.
 - `outbound_legacy` holds today's narrow protocol (about 1700 lines). It stays only so the plugin works at parity from slice 0. Slices 1 to 3 override its public methods with new ones, and the harvest drops what is no longer called.
 
@@ -112,8 +113,20 @@ The PTB version is not ours to choose, and there is nothing newer to choose:
 ### What stays coupled
 
 - Harvested code imports about 40 names from Hermes core, some private, for example `gateway.run.cfg_get` and `tools.send_message_tool._send_telegram`. A Hermes upgrade can break them. The integration suite runs against the pinned commit, and an upgrade is a deliberate step: bump the pin, run the suite.
-- Sends outside the gateway process (`hermes send`, cron in a separate process) go through the bundled code by import path (`tools/send_message_senders.py:131,253`), not through this plugin. They keep the old formatting. Cron reports delivered by the live gateway use this plugin.
+- Sends outside the gateway process (`hermes send`, cron in a separate process) go through the platform's registered `standalone_sender_fn` since `28ef6e4` (`gateway/outbound/senders.py:125-134`), which is the harvested `standalone.standalone_send`. For rich messages, albums and long replies it builds an unconnected `HermesTelegramAdapter` in that process (`telegram_outbound._standalone_adapter`), so those sends get this plugin's formatting, and its records of sent messages are written from that process too. The plugin's stores are read once and replaced whole, so a record the gateway wrote meanwhile is missing from the file until the gateway writes again. Cron reports delivered by the live gateway use this plugin, as before.
 - Installing the plugin without enabling it shadows the bundled plugin and leaves Telegram with no adapter (`checks/test_install.py`, `docs/install.md`). Deployment installs and enables in one step.
+
+### Hermes upgrades
+
+`c419cf7` to `28ef6e4` (2026-11-27, Hermes `main` with a green `nix flake check`). The bundled adapter went from 15 files to 60: `adapter.py` went from 7380 lines to 6641 as code moved into new sibling modules, and the class gained seven bases. What changed for this plugin:
+
+- Upstream now cuts an oversized rich message into parts itself (`rich_parts.py`). Answers this plugin deems rich still go through `_send_items`; the rest reach the upstream path, which sends them as before.
+- Hermes indexes every text it sends for quote replies, ordinary ones too (`_record_sent_text`, hermes-agent#147287), so that index no longer says whether a message is rich. The bot-message record says it: `ActionsMixin` notes every text that `_try_send_rich` sent or `_try_edit_rich` made rich. A tool message sent as MarkdownV2 is indexed too.
+- A deleted reply anchor is dropped and the topic kept (hermes-agent#136808); a private topic Telegram rejects twice is left for the chat root (hermes-agent#95517), by the module functions of `telegram_dm_topic_send.py`. A tool's send still fails rather than leave its topic: under `TOOL_SEND` a text's topic-gone refusal is replaced by one that does not reroute, and a media send is marked `telegram_dm_topic_created_for_send`, which upstream reads there only to refuse the reroute.
+- An upload whose reply was lost counts upstream as sent, with no notice (hermes-agent#62079). This plugin tells the chat, as it does for an album.
+- `send_draft` moved to `telegram_flood_window.py`, `format_message` to `telegram_markdown.py`; the plugin's overrides wrap them unchanged. The default of `drop_pending_on_cold_boot` is now false: messages sent while the gateway was off are answered.
+- A chat's flood window is kept on disk across restarts (`telegram_flood_cooldown_<bot>.json` in the Hermes home). Tests give each adapter its own state directory.
+- Hermes' tool bridge checks a tool's availability on every call (`tools/tool_search.py:571`). After Telegram refuses widgets, the first `telegram_widget` call gets this plugin's reason; a later call in the same session is refused by Hermes as unavailable, without reaching Telegram either way.
 
 ## Agent interface
 
@@ -261,7 +274,7 @@ How slice 3 does it (`hermes_telegram/preview.py`, `hermes_telegram/updates.py`)
 ## Testing
 
 - Unit tests cover pure logic: Markdown splitting within Telegram's limits, payload builders, widget validation, button tokens.
-- Integration tests run the real Hermes at `c419cf7` and the real PTB 22.8, installed as development dependencies at those pins. The adapter is built through Hermes' own plugin loading. There are no hand-written stand-ins for Hermes: six open findings of the Prism attempt are drift between its stand-ins and the real code (lumi-telegram issues #13, #15, #20, #30, #31, #46).
+- Integration tests run the real Hermes at the pin (`HERMES_PIN`, `28ef6e4`) and the real PTB 22.8, installed as development dependencies at those pins. The adapter is built through Hermes' own plugin loading. There are no hand-written stand-ins for Hermes: six open findings of the Prism attempt are drift between its stand-ins and the real code (lumi-telegram issues #13, #15, #20, #30, #31, #46).
 - End-to-end checks reuse Hermes' own messaging-adapter contract (`tests/e2e/core/platforms/` at the pin). It starts a real `hermes gateway run` child with a fake model and Hermes' Bot API stand-in (`tests/fakes/platforms/telegram_standin.py`) behind the PTB base URL. `checks/e2e/` runs its scenarios unchanged against this plugin. The stand-in answers only the methods the bundled adapter calls and returns 404 for anything else. The slices that need methods it lacks (`sendRichMessage`, `sendVideo`, `sendAudio`, `sendVoice`, `sendAnimation`, `sendMediaGroup`, then `sendRichMessageDraft`, `sendWidget`, `answerWidgetQuery`, `sendPoll`) extend it in a subclass in this repository, with each method checked against its documented limits. The rich sender's failure handling runs a real PTB `Bot` against the stand-in in process, with connection failures injected in httpx's transport (`checks/e2e/test_sender.py`).
 - Live acceptance is done by the owner on `vtadevbot`, with a checklist per slice. The bot token stays in 1Password and on the host, never in this repository or in a test.
 

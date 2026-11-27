@@ -1,6 +1,6 @@
 """Hermes' Bot API stand-in, extended with the Bot API 10.x methods this plugin calls.
 
-Hermes' stand-in (hermes-agent@c419cf7 tests/fakes/platforms/telegram_standin.py) answers only what the
+Hermes' stand-in (hermes-agent@28ef6e4 tests/fakes/platforms/telegram_standin.py) answers only what the
 bundled adapter calls and returns 404 for the rest; the adapter reads a 404 from ``sendRichMessage`` as
 "no rich messages here" and stops trying for the process. The methods added here check what the Bot API
 documents and nothing it does not: they hold no copy of this plugin's own rules.

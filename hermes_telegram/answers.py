@@ -28,6 +28,7 @@ from .harvested.adapter_module import (
     _iter_exception_graph,
     _separate_chunk_indicator_from_fence,
 )
+from .harvested.telegram_send_errors import classify_send_exception
 
 # An item still to send: ("rich", prepared markdown, times cut so far) or ("plain", MarkdownV2 chunk, 0).
 Item = tuple[str, str, int]
@@ -278,7 +279,7 @@ class RichAnswersMixin:
                     outcome = await self._send_chunk_with_retries(
                         chat_id, text, index, reply_to, metadata, thread_id, thread_fallback, error_types)
                 except Exception as exc:
-                    classified = self._classify_send_exception(exc, error_types)
+                    classified = classify_send_exception(self, exc)
                     return self._partial(classified, items, delivered, tail_certain=self._certainly_unsent(exc),
                                          thread_fallback=thread_fallback)
                 finally:

@@ -1,6 +1,6 @@
 """Hermes' own end-to-end rig for its Telegram adapter, pointed at this plugin.
 
-The rig and its scenarios come from the Hermes source at the pin (hermes-agent@c419cf7
+The rig and its scenarios come from the Hermes source at the pin (hermes-agent@28ef6e4
 tests/e2e/core/platforms/): a real ``hermes gateway run`` child on a throwaway home, Hermes' Bot API
 stand-in behind python-telegram-bot's ``extra.base_url``, and a fake model. The child runs Hermes from that
 source tree (the rig puts it on the child's PYTHONPATH), so the tree must be exactly the pin.

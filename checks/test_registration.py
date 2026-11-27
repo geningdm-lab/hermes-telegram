@@ -11,6 +11,7 @@ import functools
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from typing import Any
 import pytest
 
 import plugins.platforms.telegram.adapter as upstream_adapter
+from checks.harvest_rewrites import Normalize
 from hermes_telegram import register
 from hermes_telegram.adapter import HermesTelegramAdapter
 from hermes_telegram.harvested import adapter_module, adapter_transport
@@ -53,14 +55,22 @@ def _registered(register_fn) -> dict[str, Any]:
     return ctx.kwargs
 
 
-def _code(fn: Any) -> str:
-    return ast.dump(ast.parse(textwrap.dedent(inspect.getsource(fn))))
+def _code(fn: Any, *, harvested: bool = False) -> str:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    return ast.dump(Normalize().visit(tree) if harvested else tree)
 
 
 def _same(ours: Any, theirs: Any) -> bool:
-    """Equal values; functions compare by name and code, since harvested copies are new objects."""
+    """Equal values; functions compare by name and code, since harvested copies are new objects. Upstream code
+    is compared with the harvest's recorded rewrites applied."""
     if inspect.isfunction(ours) and inspect.isfunction(theirs):
-        return ours.__qualname__ == theirs.__qualname__ and _code(ours) == _code(theirs)
+        harvested = ours.__module__.startswith("hermes_telegram.harvested.")
+        return ours.__qualname__ == theirs.__qualname__ and _code(ours) == _code(theirs, harvested=harvested)
+    if isinstance(ours, re.Pattern) and isinstance(theirs, re.Pattern):
+        return ours.pattern == theirs.pattern and ours.flags == theirs.flags
+    if inspect.isbuiltin(ours) and inspect.isbuiltin(theirs) and isinstance(ours.__self__, re.Pattern):
+        # A bound method compares by its object's identity: re's cache may hand each copy its own pattern.
+        return ours.__name__ == theirs.__name__ and _same(ours.__self__, theirs.__self__)
     if isinstance(ours, functools.partial) and isinstance(theirs, functools.partial):
         return _same(ours.func, theirs.func) and _same(ours.args, theirs.args) and _same(
             ours.keywords, theirs.keywords)

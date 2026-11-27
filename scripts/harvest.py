@@ -14,8 +14,9 @@ What it does:
 - writes sdk_names.py: the SDK names check_telegram_requirements() rebinds after a lazy install, which the
   plugin copies into the mixin modules (they imported the values, not the names);
 - applies only the mechanical rewrites listed in each file's header: sibling imports become relative,
-  the repository-root sys.path insertion is dropped, module loggers keep their upstream names, and
-  references to the TelegramAdapter class name point at the mixin that now owns the method.
+  imports from the package and its adapter module point at the harvested copies (the class itself at the
+  composed adapter), module loggers keep their upstream names, and references to the TelegramAdapter class
+  name inside its methods point at the mixin that now owns the method.
 
 A method the map does not name stops the run, so an upstream change is assigned on purpose.
 """
@@ -38,9 +39,28 @@ SRC_DIR = "plugins/platforms/telegram"
 OUT_DIR = ROOT / "hermes_telegram" / "harvested"
 
 SIBLINGS = [
-    "adapter_hint", "dashboard_card", "gateway_env", "inline_picker", "telegram_context",
-    "telegram_entities", "telegram_held_inbound", "telegram_ids", "telegram_network",
-    "telegram_topic_routing", "telegram_topic_transfer", "update_admission",
+    "adapter_hint", "callback_answer", "dashboard_card", "gateway_env", "inline_picker", "rich_code_regions",
+    "rich_markdown", "rich_parts", "standalone", "telegram_addressing", "telegram_album",
+    "telegram_audio_meta", "telegram_batching", "telegram_chunking", "telegram_clarify_binding",
+    "telegram_clarify_multi", "telegram_context", "telegram_dice", "telegram_dm_topic_send",
+    "telegram_draft_budget", "telegram_entities", "telegram_flood_cooldown", "telegram_flood_window",
+    "telegram_group_observe", "telegram_held_inbound", "telegram_ids", "telegram_ingress", "telegram_intake",
+    "telegram_latex", "telegram_live_gates", "telegram_live_location", "telegram_markdown",
+    "telegram_media_budget", "telegram_media_fetch", "telegram_media_flood", "telegram_media_group",
+    "telegram_media_retry", "telegram_network", "telegram_outbound", "telegram_overflow_edit",
+    "telegram_picker_labels", "telegram_polling_probe", "telegram_pool", "telegram_replacement",
+    "telegram_resolved_prompt", "telegram_send_errors", "telegram_send_path_recovery", "telegram_split",
+    "telegram_status", "telegram_status_indicator", "telegram_text_photo_pairing", "telegram_topic_routing",
+    "telegram_topic_transfer", "telegram_typing_gate", "telegram_vault_code", "telegram_voice_mention",
+    "update_admission",
+]
+
+# The upstream TelegramAdapter's bases, in order. All but BasePlatformAdapter are defined in sibling modules,
+# so the composed adapter (hermes_telegram/adapter.py) repeats them with the harvested copies.
+BASES = [
+    "TelegramContactMixin", "TelegramHeldInboundMixin", "TelegramReplacementMixin", "TelegramTopicRoutingMixin",
+    "TelegramPendingProbeMixin", "TelegramMediaFloodMixin", "TelegramSendPathRecoveryMixin",
+    "TelegramVaultCodeMixin", "TelegramFloodCooldownMixin", "BasePlatformAdapter",
 ]
 
 # Mixin module -> (class name, purpose). Order is the MRO order of the composed adapter.
@@ -66,30 +86,30 @@ METHOD_GROUPS: dict[str, list[str]] = {
     "adapter_core": [
         "_env_float_clamped", "_teardown_started", "message_len_fn", "__init__", "send_path_degraded",
         "_mark_connected", "_mark_disconnected", "_set_fatal_error", "_is_permanent_fatal",
-        "_replacement_telegram_adapter", "_wait_for_reconnection", "_should_drop_delayed_delivery",
-        "_notification_kwargs", "_normalize_chat_type", "_fallback_ips", "_looks_like_polling_conflict",
-        "_looks_like_auth_error", "_looks_like_network_error", "_exception_graph_matches",
-        "_looks_like_connect_timeout", "_looks_like_pool_timeout", "_coerce_bool_extra", "_link_preview_kwargs",
-        "_is_bad_request_error", "_is_thread_not_found_error", "_telegram_error_types",
-        "_classify_send_exception", "_is_timed_out", "get_chat_info", "_extra_bool", "_extra_str_set",
+        "_should_drop_delayed_delivery", "_notification_kwargs", "_normalize_chat_type", "_gateway_chat_type",
+        "_fallback_ips", "_looks_like_polling_conflict", "_looks_like_auth_error",
+        "_looks_like_network_error", "_exception_graph_matches", "_looks_like_connect_timeout",
+        "_looks_like_pool_timeout", "_coerce_bool_extra", "_link_preview_kwargs", "_is_bad_request_error",
+        "_is_thread_not_found_error", "_telegram_error_types", "_is_timed_out", "get_chat_info",
+        "_extra_bool", "_extra_str_set",
     ],
     "adapter_access": [
-        "_legacy_runner_auth_fn", "_env_allowlist_decision", "_is_callback_user_authorized",
-        "_source_from_message_for_auth", "_source_from_reaction_for_auth", "_telegram_auth_env_configured",
-        "_should_pass_unauthorized_dm_for_pairing", "_is_user_authorized_from_message", "_callback_authorized",
-        "_log_blocked_user",
+        "_legacy_runner_auth_fn", "_is_callback_user_authorized", "_source_from_message_for_auth",
+        "_source_from_reaction_for_auth", "_telegram_auth_env_configured",
+        "_should_pass_unauthorized_dm_for_pairing", "_is_user_authorized_from_message",
+        "_callback_authorized", "_log_blocked_user",
     ],
     "adapter_topics": [
         "_metadata_thread_id", "_metadata_direct_messages_topic_id", "_metadata_reply_to_message_id",
         "_dm_topic_fallback", "_is_private_dm_topic_send", "_dm_topic_missing_anchor_error",
-        "_reply_to_message_id_for_send", "_thread_kwargs_for_send", "_direct_topic_kwargs",
-        "_thread_kwargs_for_draft", "_message_thread_id_for_send", "_message_thread_id_for_typing",
-        "_prune_stale_dm_topic_binding", "_should_retry_without_dm_topic_reply_anchor",
-        "_send_with_dm_topic_reply_anchor_retry", "_create_dm_topic", "create_handoff_thread", "ensure_dm_topic",
-        "rename_dm_topic", "_persist_dm_topic_thread_id", "_setup_dm_topics", "set_topic_transfer_fn",
-        "_ensure_forum_commands", "_topic_id_or_general", "_effective_message_thread_id",
-        "_reload_dm_topics_from_config", "_get_dm_topic_info", "_cache_dm_topic_from_message",
-        "_resolve_topic_binding",
+        "_is_reply_anchor_missing_error", "_reply_to_message_id_for_send", "_thread_kwargs_for_send",
+        "_direct_topic_kwargs", "_thread_kwargs_for_draft", "_message_thread_id_for_send",
+        "_message_thread_id_for_typing", "_prune_stale_dm_topic_binding",
+        "_should_retry_without_dm_topic_reply_anchor", "_send_with_dm_topic_reply_anchor_retry",
+        "_create_dm_topic", "create_handoff_thread", "ensure_dm_topic", "rename_dm_topic",
+        "_persist_dm_topic_thread_id", "_setup_dm_topics", "set_topic_transfer_fn", "_ensure_forum_commands",
+        "_topic_id_or_general", "_effective_message_thread_id", "_reload_dm_topics_from_config",
+        "_get_dm_topic_info", "_cache_dm_topic_from_message", "_resolve_topic_binding",
     ],
     "adapter_transport": [
         "_drain_polling_connections", "_bounded_request_step", "_orphan_and_rebuild_polling_client",
@@ -98,17 +118,18 @@ METHOD_GROUPS: dict[str, list[str]] = {
         "_start_polling_once", "_schedule_polling_progress_verifier", "_get_general_request_drain_lock",
         "_drain_general_connections_after_pool_timeout", "_spawn_polling_recovery", "_recovery_in_flight",
         "_schedule_polling_recovery", "_delete_webhook_best_effort", "_await_cold_start_readiness",
-        "_start_polling_resilient", "_go_fatal_network", "_stop_updater_or_go_fatal", "_restart_polling_in_task",
-        "_handle_polling_network_error", "_polling_heartbeat_loop", "_probe_pending_updates",
-        "_escalate_stuck_consumer", "_check_ingress_dispatch_stall", "_check_polling_stall", "_verifier_stale",
+        "_start_polling_resilient", "_go_fatal_network", "_stop_updater_or_go_fatal",
+        "_restart_polling_in_task", "_handle_polling_network_error", "_polling_heartbeat_loop",
+        "_check_ingress_dispatch_stall", "_check_polling_stall", "_verifier_stale",
         "_verify_polling_after_reconnect", "_disarm_ptb_retry_loop", "_handle_polling_conflict",
         "_handoff_polling_fatal_error", "_bot_identity_refresh_loop", "_start_post_connect_housekeeping",
         "_register_command_menu", "_bot_commands", "_menu_fingerprint", "_run_post_connect_housekeeping",
         "_accept_update", "_fail_update_preparation", "handle_message", "_register_handlers",
-        "_wire_plugin_handlers", "_build_ptb_requests", "_initialize_app_with_retries", "_cold_boot_drop_pending",
-        "_start_webhook_mode", "_start_polling_mode", "connect", "_set_status_indicator", "_collect_live_tasks",
-        "_clear_task_attrs_except", "_cancel_pending_delivery_tasks", "_await_disconnect_step",
-        "_restart_task_attr", "_cancel_task_attr", "disconnect",
+        "_wire_plugin_handlers", "_build_ptb_requests", "_initialize_app_with_retries",
+        "_cold_boot_drop_pending", "_start_webhook_mode", "_start_polling_mode", "connect",
+        "_set_status_indicator", "_collect_live_tasks", "_clear_task_attrs_except",
+        "_cancel_pending_delivery_tasks", "_await_disconnect_step", "_restart_task_attr", "_cancel_task_attr",
+        "disconnect",
     ],
     "adapter_events": [
         "_on_platform_update", "_source_for_platform_event_auth", "_normalize_platform_event", "_is_id_like",
@@ -117,7 +138,7 @@ METHOD_GROUPS: dict[str, list[str]] = {
     ],
     "adapter_prompts": [
         "_send_control_message", "_send_prompt", "_rows_of_two", "send_update_prompt", "_EA_HEADER",
-        "_EA_REASON_LABEL", "_EA_SMART_DENY_LINE", "_ea_escape", "_exec_approval_cmd_budget", "_EA_ACTION_LABELS",
+        "_EA_REASON_LABEL", "_EA_SMART_DENY_LINE", "_ea_escape", "_EA_ACTION_LABELS",
         "_send_exec_approval_prompt", "send_slash_confirm", "send_clarify", "_provider_get_label",
         "send_model_picker", "send_choice_picker", "_edit_result_text", "_handle_choice_picker_callback",
         "_provider_button", "_picker_nav_row", "_picker_back_cancel_row", "_paged_keyboard",
@@ -129,9 +150,8 @@ METHOD_GROUPS: dict[str, list[str]] = {
         "_handle_update_prompt_callback", "_handle_gmail_triage_callback",
     ],
     "adapter_pacing": [
-        "_is_transient_typing_error", "_record_typing_cooldown", "_typing_in_cooldown", "_chat_send_lock",
-        "_record_send_flood_cooldown", "_send_flood_cooldown_remaining", "_chat_outbound_slot_remaining",
-        "_hold_chat_outbound_slot", "send_typing", "_retrigger_typing",
+        "_is_transient_typing_error", "_record_typing_cooldown", "_chat_send_lock",
+        "_chat_outbound_slot_remaining", "_hold_chat_outbound_slot", "send_typing", "_retrigger_typing",
     ],
     "adapter_groups": [
         "_telegram_require_mention", "_telegram_observe_unmentioned_group_messages", "_telegram_guest_mode",
@@ -140,25 +160,25 @@ METHOD_GROUPS: dict[str, list[str]] = {
         "_telegram_group_allowed_chats", "_telegram_observe_allowed_chats", "_telegram_allowed_topics",
         "_telegram_ignored_threads", "_compile_mention_patterns", "_chat_type_str", "_chat_id_str",
         "_is_group_chat", "_current_bot_username", "_note_bot_username", "_observe_bot_identity_from_message",
-        "_bot_identity_is_fresh", "_refresh_bot_identity", "_is_reply_to_bot", "_entity_sources", "_entity_type",
-        "_entity_span", "_extract_bot_mention_usernames", "_telegram_entity_text", "_message_mentions_bot",
+        "_bot_identity_is_fresh", "_refresh_bot_identity", "_is_reply_to_bot", "_entity_type", "_entity_span",
+        "_extract_bot_mention_usernames", "_telegram_entity_text", "_message_mentions_bot",
         "_schedule_bot_identity_recheck", "_explicit_bot_mentions_exclude_self",
-        "_message_matches_mention_patterns", "_is_guest_mention", "_clean_bot_trigger_text", "_topic_gates_pass",
+        "_message_matches_mention_patterns", "_is_guest_mention", "_clean_bot_trigger_text",
         "_bot_sender_suppressed", "_should_observe_unmentioned_group_message",
         "_telegram_group_observe_shared_source", "_telegram_group_observe_attributed_text",
         "_telegram_group_observe_channel_prompt", "_apply_telegram_group_observe_attribution",
-        "_observe_unmentioned_group_message", "_is_own_message", "_sender_is_other_bot", "_should_process_message",
-        "_effective_update_message", "_gate_or_observe",
+        "_observe_unmentioned_group_message", "_is_own_message", "_sender_is_other_bot",
+        "_should_process_message", "_gate_or_observe",
     ],
     "adapter_inbound": [
         "_media_message_type", "_download_observed_media", "_cache_observed_media", "_attach_cached",
-        "_cache_replied_media", "_observed_media_source", "_append_observed_note", "_surface_media_cache_failure",
-        "_build_triggered_event", "_handle_text_message", "_handle_command", "_handle_location_message",
-        "_text_batch_key", "_enqueue_text_event", "_flush_buffered", "_text_batch_delay_for", "_flush_text_batch",
-        "_photo_batch_key", "_flush_photo_batch", "_merge_into_pending", "_enqueue_photo_event",
-        "_route_photo_event", "_ext_from_path", "_cache_inbound_av", "_dispatch_with_text", "_set_cached_media",
-        "_cache_inbound_document", "_handle_media_message", "_queue_media_group_event", "_flush_media_group_event",
-        "_handle_sticker", "_flatten_rich_inline_text", "_flatten_rich_blocks", "_extract_rich_reply_text",
+        "_cache_replied_media", "_observed_media_source", "_append_observed_note",
+        "_surface_media_cache_failure", "_build_triggered_event", "_handle_text_message", "_handle_command",
+        "_handle_location_message", "_text_batch_key", "_enqueue_text_event", "_flush_buffered",
+        "_text_batch_delay_for", "_flush_text_batch", "_photo_batch_key", "_flush_photo_batch",
+        "_merge_into_pending", "_enqueue_photo_event", "_route_photo_event", "_ext_from_path",
+        "_cache_inbound_av", "_set_cached_media", "_note_instead_of_media", "_cache_inbound_document",
+        "_handle_media_message", "_queue_media_group_event", "_flush_media_group_event", "_handle_sticker",
         "_reply_context", "_build_message_event",
     ],
     "adapter_outbound_legacy": [
@@ -167,25 +187,25 @@ METHOD_GROUPS: dict[str, list[str]] = {
         "_rich_content_ok", "_rich_eligible", "_should_attempt_rich", "prefers_fresh_final_streaming",
         "_rich_transport_available", "streaming_overflow_limit", "_rich_message_payload",
         "_is_rich_capability_error", "_is_rich_fallback_error", "_chunk_reply_routing",
-        "_compute_single_send_routing", "_rich_transient_result", "_record_rich_sent", "_try_send_rich",
-        "_rich_payload_base", "_rich_rejected", "_try_edit_rich", "_should_attempt_rich_draft",
-        "_try_send_rich_draft", "_should_thread_reply", "_send_chunk_markdown_or_plain", "_send_chunk_with_retries",
-        "send", "_send_text_locked", "_send_chunks", "_with_partial_send", "_resume_partial_send",
-        "send_or_update_status", "_edit_text", "_edit_markdown_or_plain", "edit_message",
-        "_truncate_stream_overflow_preview", "_send_overflow_continuation", "_edit_overflow_split",
-        "delete_message", "supports_draft_streaming", "send_draft", "_send_message_with_thread_fallback",
-        "_missing_media_path_error", "_sniff_raster_format", "_compress_image_to_jpeg",
-        "_telegram_media_too_large_note", "_int_or_zero", "_telegram_media_size_allowed", "_media_send_kwargs",
-        "_send_media", "_caption_1024", "_send_voice_bubble", "send_voice", "send_multiple_images",
-        "send_image_file", "_send_local_file", "_warn_then", "send_document", "send_video", "send_image",
-        "send_animation", "format_message", "_escape_bare_bracket",
+        "_compute_single_send_routing", "_rich_transient_result", "_send_retry_is_final", "_record_sent_text",
+        "_try_send_rich", "_rich_payload_base", "_rich_rejected", "_try_edit_rich",
+        "_should_attempt_rich_draft", "_try_send_rich_draft", "_should_thread_reply",
+        "_send_chunk_markdown_or_plain", "_send_chunk_with_retries", "send", "_send_text_locked",
+        "_send_chunks", "_with_partial_send", "_resume_partial_send", "send_or_update_status", "_edit_text",
+        "_edit_markdown_or_plain", "_after_legacy_edit", "edit_message", "_truncate_stream_overflow_preview",
+        "_send_overflow_continuation", "_edit_overflow_split", "delete_message", "supports_draft_streaming",
+        "send_draft", "_send_message_with_thread_fallback", "_missing_media_path_error",
+        "_sniff_raster_format", "_compress_image_to_jpeg", "_telegram_media_too_large_note", "_int_or_zero",
+        "_telegram_media_size_allowed", "_media_send_kwargs", "_caption_1024", "_send_voice_bubble",
+        "send_voice", "send_multiple_images", "send_image_file", "_warn_then", "send_document", "send_video",
+        "send_image", "send_animation", "format_message",
     ],
 }
 
 # Top-level definitions of adapter.py that build or register the upstream class; ours replace them.
 DROPPED_TOP_LEVEL = {"TelegramAdapter", "_build_adapter", "register"}
 
-SYS_PATH_HACK = "sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))"
+PACKAGE = "plugins.platforms.telegram"
 # Import statements only: logger names such as "plugins.platforms.telegram.adapter" stay as they are.
 SIBLING_IMPORT = re.compile(r"^(\s*from )plugins\.platforms\.telegram\.(\w+)( import )", re.M)
 # A module logger keeps the name it has upstream. Hermes loads adapter.py as
@@ -219,8 +239,9 @@ def git_ls(repo: Path, path: str) -> list[str]:
 # Registration hooks Hermes calls outside the gateway (config loads, status, setup, cron): harvested again
 # into registration.py with only the module-level code they need, so calling them imports neither
 # python-telegram-bot nor the adapter. telegram_deps_present stays out: it reads TELEGRAM_AVAILABLE.
-REGISTRATION_HOOKS = ("_resolve_notifications_mode", "_is_connected", "_standalone_send", "interactive_setup",
-                      "_apply_yaml_config")
+# The notification mode and the standalone sender moved upstream into telegram_outbound.py and standalone.py,
+# harvested whole as siblings.
+REGISTRATION_HOOKS = ("_is_connected", "interactive_setup", "_apply_yaml_config")
 
 
 def _bound_by(node: ast.stmt) -> list[str]:
@@ -274,13 +295,75 @@ def header(src_name: str, rewrites: list[str], extra: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _alias(alias: ast.alias) -> str:
+    return alias.name if alias.asname is None else f"{alias.name} as {alias.asname}"
+
+
+def _package_import(node: ast.ImportFrom) -> str | None:
+    """The relative form of an import from the upstream package or its adapter module, else None.
+
+    ``adapter.py`` has no harvested namesake: its module-level code is ``adapter_module.py``, and the class
+    the siblings import from it is the composed ``hermes_telegram.adapter.HermesTelegramAdapter``, which
+    holds every member of the upstream class (checks/test_harvest.py).
+    """
+    if node.level or node.module not in (PACKAGE, f"{PACKAGE}.adapter"):
+        return None
+    if node.module == PACKAGE:  # from plugins.platforms.telegram import x [as y]
+        names = [f"adapter_module as {a.asname or 'adapter'}" if a.name == "adapter" else _alias(a)
+                 for a in node.names]
+        return "from . import " + ", ".join(names)
+    plain = [a for a in node.names if a.name != "TelegramAdapter"]
+    composed = [a for a in node.names if a.name == "TelegramAdapter"]
+    parts = ["from .adapter_module import " + ", ".join(_alias(a) for a in plain)] if plain else []
+    parts += [f"from ..adapter import HermesTelegramAdapter as {a.asname or 'TelegramAdapter'}"
+              for a in composed]
+    return "; ".join(parts)
+
+
+def rewrite_package_imports(text: str) -> tuple[str, list[str]]:
+    """Imports from ``plugins.platforms.telegram`` and its ``adapter`` module, mapped by ``_package_import``.
+
+    Each statement is replaced in place on one line, so it stays valid inside any block. ``text`` may be a
+    class body (the methods of one mixin), which parses inside a wrapper class.
+    """
+    wrapper = "class _Wrapper:\n"
+    try:
+        tree, offset = ast.parse(text), 0
+    except SyntaxError:
+        tree, offset = ast.parse(wrapper + text), 1
+    spans = [(node, new) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+             and (new := _package_import(node)) is not None]
+    if not spans:
+        return text, []
+    lines = [line.encode("utf-8") for line in (wrapper * offset + text).splitlines(keepends=True)]
+    for node, new in sorted(spans, key=lambda s: (s[0].lineno, s[0].col_offset), reverse=True):
+        first, last = node.lineno - 1, node.end_lineno - 1  # ast columns are UTF-8 byte offsets
+        head, tail = lines[first][:node.col_offset], lines[last][node.end_col_offset:]
+        lines[first:last + 1] = [head + new.encode() + tail]
+    out = b"".join(lines).decode("utf-8")[len(wrapper) * offset:]
+    rewrites = []
+    if any(n.module == PACKAGE for n, _ in spans):
+        rewrites.append(
+            "from plugins.platforms.telegram import x -> from . import x (adapter -> adapter_module)")
+    if any(n.module != PACKAGE and any(a.name != "TelegramAdapter" for a in n.names) for n, _ in spans):
+        rewrites.append("names from plugins.platforms.telegram.adapter -> from .adapter_module")
+    if any(a.name == "TelegramAdapter" for n, _ in spans for a in n.names):
+        rewrites.append("TelegramAdapter from plugins.platforms.telegram.adapter -> the composed "
+                        "HermesTelegramAdapter from ..adapter")
+    return out, rewrites
+
+
 def rewrite_sibling_imports(text: str) -> tuple[str, list[str]]:
     """``from plugins.platforms.telegram.x import`` -> ``from .x import`` (and the same inside methods)."""
+    text, package_rewrites = rewrite_package_imports(text)
     found = sorted({m[1] for m in SIBLING_IMPORT.findall(text)})
     new = SIBLING_IMPORT.sub(lambda m: f"{m.group(1)}.{m.group(2)}{m.group(3)}", text)
     if re.search(r"^\s*import plugins\.platforms\.telegram\b", new, re.M):
         raise SystemExit("unexpected 'import plugins.platforms.telegram.x' form; extend the rewrite")
-    return new, [f"sibling import plugins.platforms.telegram.{m} -> relative .{m}" for m in found]
+    if re.search(r"^\s*from plugins\.platforms\.telegram\b", new, re.M):
+        raise SystemExit("an import from plugins.platforms.telegram is left unrewritten; extend the rewrite")
+    return new, package_rewrites + [
+        f"sibling import plugins.platforms.telegram.{m} -> relative .{m}" for m in found]
 
 
 def module_bound_names(tree: ast.Module) -> set[str]:
@@ -325,7 +408,7 @@ def split_adapter(text: str) -> dict[str, str]:
 
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TelegramAdapter")
     bases = [ast.unparse(b) for b in cls.bases]
-    if bases != ["TelegramHeldInboundMixin", "TelegramTopicRoutingMixin", "BasePlatformAdapter"]:
+    if bases != BASES:
         raise SystemExit(f"TelegramAdapter bases changed upstream: {bases}")
 
     owner = {name: group for group, names in METHOD_GROUPS.items() for name in names}
@@ -374,9 +457,8 @@ def split_adapter(text: str) -> dict[str, str]:
             for i in range(start - 1, node.end_lineno):
                 keep[i] = False
     module_text = "".join(line for line, k in zip(lines, keep) if k)
-    if SYS_PATH_HACK not in module_text:
-        raise SystemExit("the sys.path insertion changed upstream; review it")
-    module_text = module_text.replace(SYS_PATH_HACK, "pass  # repository-root sys.path insertion dropped by harvest")
+    if "sys.path.insert" in module_text:
+        raise SystemExit("adapter.py inserts into sys.path again; review it")
     module_text, rewrites = rewrite_sibling_imports(module_text)
     module_text, logger_rewrites = rewrite_logger(module_text, ADAPTER_LOGGER)
     module_names = module_bound_names(ast.parse(module_text))
@@ -392,7 +474,6 @@ def split_adapter(text: str) -> dict[str, str]:
         ) + hooks_text,
         "adapter_module.py": header(
             "adapter.py", rewrites + logger_rewrites + [
-                "repository-root sys.path insertion dropped (the plugin imports Hermes as installed)",
                 f"removed {', '.join(sorted(DROPPED_TOP_LEVEL))}: hermes_telegram builds and registers the adapter",
             ], "Module-level code of adapter.py: imports, helpers, constants, registration hooks.",
         ) + module_text,

@@ -33,8 +33,8 @@ scripts/hermes-src.sh
 ## Upgrading Hermes
 
 1. Write the new commit to `HERMES_PIN`, the one input every tool reads. Put the same commit in the `hermes-agent` URL of `pyproject.toml`, mirror that commit's `[tool.uv]` overrides there, and run `mise exec -- uv sync`. `checks/test_harvest.py` fails while the two disagree.
-2. Run `scripts/hermes-src.sh`, then `.venv/bin/python scripts/harvest.py --src .cache/hermes-agent`. The harvest reads the pinned commit's objects, not the checkout's working files. A method that the upstream class added, removed or renamed stops the harvest until it is assigned in `METHOD_GROUPS`.
-3. Review the diff of `hermes_telegram/harvested/` and run the checks.
+2. Run `scripts/hermes-src.sh`, then `.venv/bin/python scripts/harvest.py --src .cache/hermes-agent`. The harvest reads the pinned commit's objects, not the checkout's working files. A method that the upstream class added, removed or renamed stops the harvest until it is assigned in `METHOD_GROUPS`; so does a sibling module (`SIBLINGS`) or a base class (`BASES`, which `hermes_telegram/adapter.py` repeats with the harvested copies).
+3. Review the diff of `hermes_telegram/harvested/` and run the checks. A green run is not enough: diff every upstream method this plugin overrides or calls between the two commits, since a changed contract (an argument, a result field, a moved retry) can leave an override working against the old one. `docs/design.md`, Hermes upgrades, records what each upgrade changed.
 
 ## Boundaries
 
