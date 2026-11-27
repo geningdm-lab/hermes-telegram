@@ -81,8 +81,10 @@ def prepare(owner_id: int, *, provider: str, model: str, api: str, playbook: str
     config = {
         "model": {"provider": provider, "default": model},
         "plugins": {"enabled": ["platforms/telegram"]},
-        "platforms": {"telegram": {"enabled": True, "extra": {"base_url": f"{api}/bot",
-                                                               "base_file_url": f"{api}/file/bot"}}},
+        "platforms": {"telegram": {"enabled": True, "extra": {
+            "base_url": f"{api}/bot", "base_file_url": f"{api}/file/bot",
+            # Rows B1 to BL: the owner's Business chats go to the inbox (docs/business-inbox.md).
+            "business_inbox": {"owners": {str(owner_id): "default"}}}}},
         # Row 10's acceptance profile: the failure message is the only one the chat shows.
         "display": {"suppress_warning_notifications": True},
         # Row 7: the gateway streams the answer into the preview (Hermes' default is off: gateway/config.py

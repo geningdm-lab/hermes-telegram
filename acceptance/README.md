@@ -37,6 +37,19 @@ Everything runs by default; give row keys to run some (`run 2 11 X5`); `rows` li
 
 Rows 12 to 14 cannot pass for now: since 2026-11-13 Telegram refuses widgets from general bots (`INPUT_MEDIA_WIDGET_NOT_ALLOWED`; `docs/design.md`, Acceptance).
 
+## The Business inbox rows
+
+Rows B1 to BL are slice 3 of `docs/business-inbox.md`: the bot connected to the owner's own account, kept chats read back through `hermes telegram inbox`. The acceptance home sets `business_inbox` for the owner's id. They need a second Telegram account the owner holds (another phone number, added in the iOS app's account switcher): the "other person" of the chat. The bot is given only the chat with that account. One business bot may be connected to an account at a time (core.telegram.org/api/bots/connected-business-bots), so connecting vtadevbot replaces any other.
+
+| Row | The owner does | What the run checks |
+|---|---|---|
+| B1 | connects vtadevbot (Settings > Telegram Business > Chatbots: only the chat with the second account, every right off), then sends a code from the second account | the connection grants no reply; nothing the bot asked of Telegram touched that chat; no agent turn saw the text; `window` keeps it as `contact`; `status` shows the connection |
+| B2 | sends a code from the main account in that chat | whether Telegram delivers the owner's own message at all (it is not documented), and then that it is kept as `owner`, with no call and no turn |
+| B3 | edits the B1 message from the second account, then deletes it for both | both versions kept, the newest as the text; the record marked deleted with its text |
+| BL | sends one more code, then opens each printed link from Saved Messages | the contract's link is the chat link; for each candidate (`tg://user`, `tg://openmessage`, and with a username `tg://resolve?...&post=` and `t.me/<username>/<id>`), whether iOS opened the message itself |
+
+Run them in order (`run B1 B2 B3 BL`): B2 to BL use what B1 learned. Afterwards remove vtadevbot from the account's chatbots. What BL finds goes into `docs/business-inbox.md` (Read contract, `link`): a form that opens the message becomes `exact`.
+
 ## After the runs
 
 Restart the host's `vtadevbot` gateway. The state directory can then be deleted: `~/.local/state/hermes-telegram-acceptance/`.

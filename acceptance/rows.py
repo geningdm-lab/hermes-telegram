@@ -10,7 +10,12 @@ tap inside a widget, the Stop button) is asked at that moment. Both go into the 
 
 import asyncio
 import json
+import os
 import re
+import secrets
+import sqlite3
+import subprocess
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -23,7 +28,7 @@ from hermes_telegram.widgets import check_widget
 from . import samples as S
 from .evidence import (agent_log, deleted, frames, incoming, messages, of_type, shown, table_cells, timeline,
                        uploads)
-from .home import Gateway
+from .home import HOME, Gateway
 from .recorder import Call, Recorder, Update
 
 Steps = Union[str, Callable[[dict[str, Path]], str]]
@@ -642,3 +647,160 @@ async def row_17(run: Run) -> None:
     run.check("the work went on after one tap", any("R17 done" in shown(m) for _, m in sent))
     await run.compare(scheduled.at, "Row 17: did the report arrive while the preview ran, and does the approval "
                                     "prompt stay visible with its choice resolved?")
+
+
+# --- the Business inbox (docs/business-inbox.md, slice 3) ----------------------------------------------------
+#
+# The owner connects vtadevbot to their own account (Settings > Business > Chatbots) and gives it one chat only:
+# the chat with a second account the owner holds. The run sends nothing to the bot here; it watches what Telegram
+# delivers, what the bot asks of Telegram, what reached the agent, and what `hermes telegram inbox` (slice 2's
+# contract) reads back from the acceptance home.
+
+_BUSINESS: dict[str, Any] = {}  # what B1 learned, for the rows after it: the connection and the other account
+
+
+def inbox(*args: str) -> dict[str, Any]:
+    """``hermes telegram inbox ...`` in the acceptance home, as a reader would run it."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TELEGRAM_"))}
+    env["HERMES_HOME"] = str(HOME)
+    done = subprocess.run([sys.executable, "-m", "hermes_cli.main", "telegram", "inbox", *args], env=env,
+                          cwd=str(HOME), capture_output=True, text=True, timeout=120)
+    return json.loads(done.stdout or "{}")
+
+
+def into_business(calls: list[Call], contact: int) -> list[str]:
+    """The methods the bot called on the Business path: in the chat with ``contact``, or naming a connection.
+    Only ``getBusinessConnection`` is allowed (B7)."""
+    return [c.method for c in calls if c.method != "getBusinessConnection"
+            and (c.params.get("business_connection_id") or str(c.params.get("chat_id")) == str(contact))]
+
+
+def agent_saw(text: str, since: float) -> bool:
+    """Whether any session of the acceptance home, not only the owner's chat, recorded ``text`` since ``since``."""
+    db = HOME / "state.db"
+    if not db.exists():
+        return False
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+        return conn.execute("SELECT 1 FROM messages WHERE timestamp >= ? AND instr(content, ?) > 0 LIMIT 1",
+                            (since, text)).fetchone() is not None
+
+
+async def _delivered(run: Run, kind: str, instruction: str, since: float, match: Callable[[Update], bool],
+                     timeout: float = 600.0) -> Update:
+    """Tell the owner what to do; the business update Telegram delivers for it (from either account)."""
+    run.say(f"\n>>> On iOS: {instruction}")
+    return await run.rec.wait_for(lambda: next((u for u in run.rec.delivered(since, kind) if match(u)), None),
+                                  timeout=timeout, what=instruction)
+
+
+def _from(update: Update) -> int | None:
+    return (update.body.get("from") or {}).get("id")
+
+
+def _kept(contact: int, owner: int, text: str) -> list[dict[str, Any]]:
+    records = inbox("window", "--chat", f"{owner}.{contact}", "--limit", "1000").get("records") or []
+    return [r for r in records if any(v.get("text") == text for v in r.get("versions") or ())]
+
+
+def _business_context(run: Run) -> tuple[int, str]:
+    if "contact" not in _BUSINESS:
+        raise RuntimeError("run B1 first: it connects the bot and learns the second account")
+    return _BUSINESS["contact"], _BUSINESS["token"]
+
+
+@row("B1", "A message from the other person in a connected chat is kept, and nobody answers it")
+async def row_b1(run: Run) -> None:
+    since = time.time()
+    token = secrets.token_hex(2)
+    connected = await _delivered(
+        run, "business_connection",
+        "Settings > Telegram Business > Chatbots: add vtadevbot. Under chats, choose only the chat with your second "
+        "account; turn every right off (replying in particular).", since,
+        lambda u: (u.body.get("user") or {}).get("id") == run.owner_id and u.body.get("is_enabled"))
+    rights = connected.body.get("rights") or {}
+    run.check("the connection grants no right to reply", not rights.get("can_reply"), rights)
+    code = f"b1-{token} are we still on for dinner?"
+    message = await _delivered(run, "business_message", f"from your second account, send this account:  {code}",
+                               connected.at, lambda u: _norm(u.body.get("text")) == _norm(code)
+                               and _from(u) != run.owner_id)
+    contact = int(message.body["chat"]["id"])
+    _BUSINESS.update(contact=contact, token=token, b1=int(message.body["message_id"]),
+                     username=(message.body.get("from") or {}).get("username"))
+    await asyncio.sleep(20)  # time for any turn or send it might wrongly start
+    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [],
+              into_business(run.rec.sent(since), contact))
+    run.check("no agent turn saw it", not agent_saw(code, since))
+    kept = _kept(contact, run.owner_id, code)
+    run.check("the inbox keeps it as the other person's", [r.get("author") for r in kept] == ["contact"], kept)
+    status = inbox("status")
+    run.check("status shows the connection, enabled, with replying off",
+              any(c.get("enabled") and not c["rights"].get("can_reply") for c in status.get("connections") or ()),
+              status.get("connections"))
+    await run.observe("B1: does the chat with your second account show no reply, and no 'read' mark the bot made? "
+                      "And did the bot send nothing in its own chat with you?")
+
+
+@row("B2", "The owner's own message in that chat is kept as the owner's")
+async def row_b2(run: Run) -> None:
+    contact, token = _business_context(run)
+    since = time.time()
+    code = f"b2-{token} yes, at 8"
+    try:
+        await _delivered(run, "business_message", f"from this account, in the chat with your second account, send:  "
+                         f"{code}", since, lambda u: _norm(u.body.get("text")) == _norm(code)
+                         and _from(u) == run.owner_id, timeout=180)
+        delivered = True
+    except TimeoutError:
+        delivered = False
+    # Telegram does not document that a connected bot receives the account's own messages (docs/business-inbox.md).
+    run.check("Telegram delivered the owner's own message to the bot", delivered)
+    await asyncio.sleep(10)
+    if delivered:
+        run.check("the inbox keeps it as the owner's", [r.get("author") for r in _kept(contact, run.owner_id, code)]
+                  == ["owner"])
+    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [])
+    run.check("no agent turn saw it", not agent_saw(code, since))
+
+
+@row("B3", "An edit adds a version; a deletion marks the record and keeps its text")
+async def row_b3(run: Run) -> None:
+    contact, token = _business_context(run)
+    since = time.time()
+    original = f"b1-{token} are we still on for dinner?"
+    edited = f"b1-{token} are we still on, at 9?"
+    b1 = _BUSINESS["b1"]
+    await _delivered(run, "edited_business_message", f"on your second account, edit the B1 message to:  {edited}",
+                     since, lambda u: u.body.get("message_id") == b1 and _norm(u.body.get("text")) == _norm(edited))
+    await _delivered(run, "deleted_business_messages", "on your second account, delete that message for both of you.",
+                     since, lambda u: b1 in (u.body.get("message_ids") or ()))
+    await asyncio.sleep(5)
+    kept = _kept(contact, run.owner_id, original)
+    run.check("both versions, the newest as the text", [[v.get("text") for v in r["versions"]] for r in kept]
+              == [[original, edited]] and kept[0].get("text") == edited, kept)
+    run.check("marked deleted, its text kept", bool(kept) and kept[0].get("deleted") is not None, kept)
+    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [])
+
+
+@row("BL", "Which link opens a kept message on iOS")
+async def row_bl(run: Run) -> None:
+    contact, token = _business_context(run)
+    since = time.time()
+    code = f"bl-{token} the link test"
+    message = await _delivered(run, "business_message", f"from your second account, send this account:  {code}",
+                               since, lambda u: _norm(u.body.get("text")) == _norm(code) and _from(u) != run.owner_id)
+    await asyncio.sleep(5)
+    [record] = _kept(contact, run.owner_id, code) or [{}]
+    run.check("the contract links the other person", record.get("link") ==
+              {"kind": "chat", "url": f"tg://user?id={contact}"}, record.get("link"))
+    mid, username = int(message.body["message_id"]), _BUSINESS.get("username")
+    candidates = [("the contract's", f"tg://user?id={contact}"),
+                  ("openmessage", f"tg://openmessage?user_id={contact}&message_id={mid}")]
+    if username:
+        candidates += [("resolve", f"tg://resolve?domain={username}&post={mid}"),
+                       ("t.me", f"https://t.me/{username}/{mid}")]
+    run.say("\n    Paste these into Saved Messages on iOS and tap each, in order:")
+    for name, url in candidates:
+        run.say(f"      {name}:  {url}")
+    for name, url in candidates:
+        await run.observe(f"BL {name} link ({url}): did it open the message `{code}` itself, highlighted in the chat?")
+    await run.pause("Last: Settings > Telegram Business > Chatbots, remove vtadevbot (or keep it for another run).")

@@ -174,3 +174,27 @@ def test_a_run_empties_only_a_home_the_kit_made(tmp_path: Path, monkeypatch) -> 
     home._fresh_home()
     assert sorted(p.name for p in ours.iterdir()) == [home._MARK, "logs"]
     assert (ours / "logs" / "gateway.log").read_text() == "kept"
+
+
+def test_the_acceptance_home_keeps_the_owners_business_chats(tmp_path: Path, monkeypatch) -> None:
+    # Rows B1 to BL. Bug: the home without business_inbox, so the run sees an inbox that stores nothing.
+    from ruamel.yaml import YAML
+
+    from acceptance import home
+
+    monkeypatch.setattr(home, "HOME", tmp_path / "hermes")
+    home.prepare(42, provider="anthropic", model="m", api="http://127.0.0.1:1", playbook="# p")
+    config = YAML().load((tmp_path / "hermes" / "config.yaml").read_text())
+    assert config["platforms"]["telegram"]["extra"]["business_inbox"] == {"owners": {"42": "default"}}
+
+
+def test_the_business_rows_flag_any_call_into_the_chat_but_a_connection_lookup() -> None:
+    # B7 live. Bugs: a send into the chat passing because it names no connection; the allowed lookup flagged.
+    from acceptance.recorder import Call
+
+    calls = [Call(0.0, "getBusinessConnection", {"business_connection_id": "bc"}, True),
+             Call(0.0, "sendMessage", {"chat_id": 4242, "text": "hi"}, True),
+             Call(0.0, "readBusinessMessage", {"business_connection_id": "bc", "chat_id": 4242}, True),
+             Call(0.0, "sendMessage", {"chat_id": 42, "text": "the owner's own chat"}, True),
+             Call(0.0, "getUpdates", {}, True)]
+    assert rows.into_business(calls, 4242) == ["sendMessage", "readBusinessMessage"]
