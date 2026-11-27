@@ -1,6 +1,6 @@
 [project]
 name = "hermes-telegram"
-version = "0.0.0"
+version = "0.2.0"
 description = "Telegram platform plugin for Hermes Agent with the full Bot API presentation surface"
 requires-python = ">=3.14,<3.15"
 license = "MIT"

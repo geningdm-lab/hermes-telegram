@@ -32,7 +32,7 @@ from .harvested.telegram_ids import parse_send_target
 from .harvested.telegram_outbound import resolve_notifications_mode
 from .hint import PLATFORM_HINT
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 logger = logging.getLogger(__name__)
 
 _ADAPTER_MODULE = __package__ + ".harvested.adapter_module"
