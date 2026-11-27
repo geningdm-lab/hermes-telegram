@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _POLL_MEMORY = 500
 _STICKER_MEMORY = 500
 _BOT_MESSAGE_MEMORY = 4000
+_RICH_SENT_MEMORY = 512  # rich texts sent since their send began, until the send's record is made
 _AGENT_REACTION_MEMORY = 500
 _SET_RETRY_SECS = 60.0
 _POLL_WAIT_SECS = 5.0
@@ -218,13 +219,50 @@ class ActionsMixin:
                                           "bot": self._bot_identity(), "profile": profile}
                 if markup:
                     record["markup"] = markup
-                if rich is not None:
-                    record["rich"] = rich
+                went_rich = self._rich_sent().pop(f"{chat_id}:{mid}", False)
+                if rich is not None or kind == "text":
+                    record["rich"] = went_rich if rich is None else rich
                 try:
                     store.put(f"{chat_id}:{mid}", record)
                 except StoreError:
                     logger.warning("[%s] a sent message could not be remembered for reactions", self.name,
                                    exc_info=True)
+
+    def _rich_sent(self) -> "OrderedDict[str, bool]":
+        return self.__dict__.setdefault("_hermes_telegram_rich_sent", OrderedDict())
+
+    def _note_rich(self, chat_id: Any, message_id: Any) -> None:
+        """A text that went or became rich. Hermes' quote index cannot say so: it holds ordinary texts too
+        (hermes-agent#147287). The record says it, or the one ``send`` makes once the send returns will."""
+        key = f"{chat_id}:{message_id}"
+        mine = self._bot_message(chat_id, message_id)
+        if mine is None:
+            noted = self._rich_sent()
+            noted[key] = True
+            noted.move_to_end(key)
+            while len(noted) > _RICH_SENT_MEMORY:
+                noted.popitem(last=False)
+        elif mine.get("rich") is not True:
+            try:
+                self._store("bot_messages", _BOT_MESSAGE_MEMORY).put(key, {**mine, "rich": True})
+            except StoreError:
+                logger.warning("[%s] a rich message could not be remembered as rich", self.name, exc_info=True)
+
+    async def _try_send_rich(self, chat_id: str, content: str, reply_to: Optional[str],
+                             metadata: Optional[dict[str, Any]]) -> Any:
+        """Every rich text goes out here: answers, their parts and Hermes' own long rich replies."""
+        result = await super()._try_send_rich(chat_id, content, reply_to, metadata)
+        if result is not None and result.success and result.message_id:
+            self._note_rich(chat_id, result.message_id)
+        return result
+
+    async def _try_edit_rich(self, chat_id: str, message_id: str, content: str,
+                             metadata: Optional[dict[str, Any]] = None) -> Any:
+        """A streamed answer's preview, sent ordinary, becomes rich here when it is finalized."""
+        result = await super()._try_edit_rich(chat_id, message_id, content, metadata=metadata)
+        if result is not None and result.success:
+            self._note_rich(chat_id, message_id)
+        return result
 
     def _bot_message(self, chat_id: Any, message_id: Any) -> Optional[dict[str, Any]]:
         """``{"thread": ..., "kind": ...}`` when ``message_id`` is one of the bot's messages in ``chat_id``.
@@ -247,11 +285,11 @@ class ActionsMixin:
         return result
 
     async def _send_with_dm_topic_reply_anchor_retry(self, send_fn: Any, send_kwargs: dict[str, Any],
-                                                     metadata: Optional[dict[str, Any]],
-                                                     reply_to_message_id: Optional[int], media_label: str,
-                                                     reset_media: Optional[Any] = None) -> Any:
-        sent = await super()._send_with_dm_topic_reply_anchor_retry(send_fn, send_kwargs, metadata,
-                                                                    reply_to_message_id, media_label, reset_media)
+                                                     metadata: Optional[dict[str, Any]], media_label: str,
+                                                     reset_media: Optional[Any] = None,
+                                                     deadline: Optional[float] = None) -> Any:
+        sent = await super()._send_with_dm_topic_reply_anchor_retry(send_fn, send_kwargs, metadata, media_label,
+                                                                    reset_media, deadline)
         self._remember_bot_messages(send_kwargs.get("chat_id"), sent,
                                     self._delivered_thread(self._metadata_thread_id(metadata), sent), kind="media")
         return sent

@@ -4,7 +4,7 @@ Read README.md and docs/design.md before changing anything. The design's accepta
 
 ## Rules
 
-- Target the pinned Hermes, `NousResearch/hermes-agent@c419cf7`. Cite Hermes as `hermes-agent@c419cf7:path:line`. Upstream docs of a newer Hermes are not evidence for the pinned one.
+- Target the pinned Hermes, `NousResearch/hermes-agent@28ef6e4` (`HERMES_PIN`). Cite Hermes as `hermes-agent@28ef6e4:path:line`. Upstream docs of a newer Hermes are not evidence for the pinned one.
 - Cite Telegram behaviour from core.telegram.org with the page. Production support is what counts; the test server is not acceptance. A passing test is not a live delivery.
 - Harvested upstream code: keep the MIT notice, name the upstream path and commit in the file header, and mark every local change to it.
 - Test against the real pinned Hermes and python-telegram-bot, with Telegram replaced by a local HTTP server. Do not write stand-ins for Hermes modules.

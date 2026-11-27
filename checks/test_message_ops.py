@@ -236,12 +236,13 @@ async def test_a_message_another_bot_sent_in_the_same_chat_is_not_this_bots(tmp_
 
 
 async def test_a_media_send_that_fell_back_to_the_root_chat_is_not_in_the_topic(adapter):
-    # Review slice 6, P1: Hermes retries a DM-topic media send without its topic when the anchor is gone.
+    # Review slice 6, P1: Hermes retries a DM-topic media send without its topic when the topic is gone.
     from gateway.platforms.base import MessageEvent, _thread_metadata_for_event
 
     source = adapter.build_source(chat_id=OWNER, chat_type="dm", user_id=OWNER, thread_id="7", message_id="40")
     metadata = dict(_thread_metadata_for_event(MessageEvent(text="hi", source=source, message_id="40")) or {})
-    adapter.bot_stub.fail["sendPoll"] = [BadRequest("Message to be replied not found")]
+    # Hermes reroutes to the root chat a send whose topic is gone twice (telegram_dm_topic_send.py).
+    adapter.bot_stub.fail["sendPoll"] = [BadRequest("Message thread not found")] * 2
     sent = await adapter.send_poll(OWNER, "Capital?", ["Paris", "Rome"], metadata)  # an answer's, not a tool's
     assert adapter.bot_stub.of("sendPoll")[-1].get("message_thread_id") is None  # it landed in the root chat
     with pytest.raises(TurnRefused, match="one of your messages"):
@@ -283,6 +284,34 @@ async def test_an_ordinary_message_is_edited_as_one_and_a_rich_one_as_rich(adapt
     assert "rich_message" in second
     # Review slice 6, P2: a reply to the edited rich message gets its new text as context.
     assert "3 | 4" in rich_sent_store.lookup(OWNER, rich_one["message_id"])
+
+
+async def test_an_answer_is_edited_in_the_form_it_was_sent(adapter):
+    # Hermes indexes every text it sends for quote replies (hermes-agent#147287), ordinary ones too, so its
+    # index no longer tells a rich answer from an ordinary one.
+    from gateway import rich_sent_store
+
+    turn = _turn(adapter)
+    plain = await adapter.send(OWNER, "Plain words")
+    table = "| a | b |\n|---|---|\n| 1 | 2 |"
+    rich_answer = await adapter.send(OWNER, table)
+    assert rich_sent_store.lookup(OWNER, plain.message_id) is not None  # an ordinary answer is indexed too
+    await _change(adapter, turn, op="edit", message_id=plain.message_id, text="Other words")
+    await _change(adapter, turn, op="edit", message_id=rich_answer.message_id, text="| a | b |\n|---|---|\n| 3 | 4 |")
+    first, second = adapter.bot_stub.of("editMessageText")
+    assert "parse_mode" in first and "rich_message" not in first
+    assert "rich_message" in second
+
+
+async def test_a_streamed_answer_finalized_as_rich_is_edited_as_rich(adapter):
+    # The stream sends an ordinary preview and edits it into a rich message when it finalizes.
+    turn = _turn(adapter)
+    preview = await adapter.send(OWNER, "| a | b |", metadata={"expect_edits": True})
+    table = "| a | b |\n|---|---|\n| 1 | 2 |"
+    final = await adapter.edit_message(OWNER, preview.message_id, table, finalize=True)
+    assert final.success and "rich_message" in adapter.bot_stub.of("editMessageText")[-1]
+    await _change(adapter, turn, op="edit", message_id=preview.message_id, text="| a | b |\n|---|---|\n| 3 | 4 |")
+    assert "rich_message" in adapter.bot_stub.of("editMessageText")[-1]
 
 
 async def test_an_edit_telegram_did_not_confirm_retires_the_old_choices(adapter):

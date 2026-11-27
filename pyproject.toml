@@ -12,7 +12,7 @@ dependencies = []
 dev = [
   # The Hermes commit homelab deploys, with its Telegram extra (python-telegram-bot 22.8), and its Anthropic
   # extra: the SDK of the acceptance run's default provider (acceptance/README.md).
-  "hermes-agent[telegram,anthropic] @ git+https://github.com/NousResearch/hermes-agent.git@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee",
+  "hermes-agent[telegram,anthropic] @ git+https://github.com/NousResearch/hermes-agent.git@28ef6e4e7d1df3015bf786dea6b0d355baf5c211",
   # Test pins follow Hermes' own dev group at that commit.
   "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
@@ -22,7 +22,7 @@ dev = [
 
 [tool.uv]
 package = false
-# Mirrors [tool.uv] of hermes-agent@c419cf7 (pyproject.toml): Hermes resolves only on 3.14 and
+# Mirrors [tool.uv] of hermes-agent@28ef6e4 (pyproject.toml): Hermes resolves only on 3.14 and
 # overrides these pins of its own dependencies. Without them its requirements do not resolve.
 # Update together with the Hermes pin above.
 environments = ["python_version >= '3.14'"]

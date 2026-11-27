@@ -1,4 +1,4 @@
-# The manifest of the bundled Telegram plugin (hermes-agent@c419cf7: plugins/platforms/telegram/plugin.yaml),
+# The manifest of the bundled Telegram plugin (hermes-agent@28ef6e4: plugins/platforms/telegram/plugin.yaml),
 # with this plugin's version and description. The name and the install path
 # $HERMES_HOME/plugins/platforms/telegram/ give it the bundled plugin's key, platforms/telegram,
 # so Hermes loads this plugin instead of the bundled one.

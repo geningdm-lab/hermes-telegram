@@ -1,7 +1,7 @@
 """The Telegram system-prompt hint (``PlatformEntry.platform_hint``) this plugin registers.
 
 These bytes land in every cached system prompt for the platform: change them deliberately. The bundled hint
-(hermes-agent@c419cf7 plugins/platforms/telegram/adapter_hint.py) told the agent "no tables"; this plugin
+(hermes-agent@28ef6e4 plugins/platforms/telegram/adapter_hint.py) told the agent "no tables"; this plugin
 sends structured answers as Telegram rich messages, so tables, task lists and LaTeX are shown natively.
 The media part is the bundled one: the ``MEDIA:`` and ``[[audio_as_voice]]`` paths are unchanged.
 Widgets are named as a tool the agent may not have: a session started after Telegram refused the bot

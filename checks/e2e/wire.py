@@ -8,6 +8,7 @@ is the one PTB raises in production. Hermes' stand-in needs the pinned source: t
 import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -81,7 +82,7 @@ class Sender:
 
 
 @pytest.fixture(name="sender")
-async def sender_fixture(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Sender]:
+async def sender_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator[Sender]:
     from telegram import Bot
     from telegram.request import HTTPXRequest
 
@@ -94,6 +95,9 @@ async def sender_fixture(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Sende
     adapter = HermesTelegramAdapter(PlatformConfig(enabled=True, token=standin.token))
     adapter._bot = bot
     adapter._telegram_chat_outbound_slot_secs = 0  # no 1 s pacing between parts in tests
+    # The adapter's state files, its own per test: Hermes keeps a chat's flood window on disk across restarts
+    # (telegram_flood_cooldown.py), so one test's 30 s window would refuse the next test's sends.
+    adapter._update_receipt_dir = tmp_path
     try:
         yield Sender(standin, wire, adapter)
     finally:

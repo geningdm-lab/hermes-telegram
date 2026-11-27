@@ -1,6 +1,6 @@
 """Plugin registration: the bundled Telegram registration with this plugin's adapter.
 
-``build_adapter`` and ``register`` follow ``_build_adapter`` and ``register`` of hermes-agent@c419cf7
+``build_adapter`` and ``register`` follow ``_build_adapter`` and ``register`` of hermes-agent@28ef6e4
 ``plugins/platforms/telegram/adapter.py`` (MIT, Nous Research), which the harvest drops because they name
 the upstream class. checks/test_registration.py holds every argument to the bundled registration except
 those in its ``OWN`` table.
@@ -9,7 +9,9 @@ Hermes defers only bundled platform plugins: an enabled user plugin registers in
 discovers plugins, the CLI included (hermes_cli/plugins_discovery.py:312), and its hooks run on every
 config load (gateway/config_env.py:206). So nothing here imports python-telegram-bot or the adapter
 until a gateway builds one. The hooks Hermes calls outside the gateway are the bundled functions,
-harvested into ``harvested/registration.py`` with only the light imports they need.
+harvested into ``harvested/registration.py`` with only the light imports they need, and the harvested
+``telegram_outbound`` (notification mode) and ``standalone`` (sends outside the gateway) modules, which
+import neither until they send.
 """
 
 import importlib
@@ -22,16 +24,13 @@ from typing import Any
 from agent.i18n import t
 
 from .harvested import gateway_env
-from .hint import PLATFORM_HINT
+from .harvested.adapter_hint import PLATFORM_HINT_TOOL_NOTES
 from .harvested.dashboard_card import DASHBOARD_CARD
-from .harvested.registration import (
-    _apply_yaml_config,
-    _is_connected,
-    _resolve_notifications_mode,
-    _standalone_send,
-    interactive_setup,
-)
+from .harvested.registration import _apply_yaml_config, _is_connected, interactive_setup
+from .harvested.standalone import standalone_send
 from .harvested.telegram_ids import parse_send_target
+from .harvested.telegram_outbound import resolve_notifications_mode
+from .hint import PLATFORM_HINT
 
 VERSION = "0.1.0"
 logger = logging.getLogger(__name__)
@@ -92,7 +91,7 @@ def build_adapter(config: Any) -> Any:
     propagate_sdk_names()
     adapter = HermesTelegramAdapter(config)
     try:
-        adapter._notifications_mode = _resolve_notifications_mode()
+        adapter._notifications_mode = resolve_notifications_mode()
     except Exception:  # Same fallback as upstream: an unreadable mode must not stop the platform.
         logger.debug("Telegram notifications mode unreadable; using 'important'", exc_info=True)
         adapter._notifications_mode = "important"
@@ -110,9 +109,9 @@ def registration_kwargs() -> dict[str, Any]:
         ensure_deps_fn=ensure_telegram_requirements, is_connected=_is_connected,
         required_env=["TELEGRAM_BOT_TOKEN"], install_hint=t("platform.telegram.install_hint"),
         setup_fn=interactive_setup, apply_yaml_config_fn=_apply_yaml_config,
-        cron_deliver_env_var="TELEGRAM_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
+        cron_deliver_env_var="TELEGRAM_HOME_CHANNEL", standalone_sender_fn=standalone_send,
         max_message_length=4096, emoji="✈️", allow_update_command=True,
-        platform_hint=PLATFORM_HINT,
+        platform_hint=PLATFORM_HINT, platform_hint_tool_notes=PLATFORM_HINT_TOOL_NOTES,
         display_tier="high",
         display_overrides={"tool_progress": "off", "busy_ack_detail": False},
         target_ref_syntax_fn=parse_send_target,

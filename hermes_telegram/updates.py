@@ -1,4 +1,4 @@
-# The two methods below are copied from NousResearch/hermes-agent@c419cf7c864ac0ee511dbd9f7091a8bba0b567ee:
+# The two methods below are copied from NousResearch/hermes-agent@28ef6e4e7d1df3015bf786dea6b0d355baf5c211:
 # plugins/platforms/telegram/adapter.py (TelegramAdapter._start_polling_once, TelegramAdapter._start_webhook_mode),
 # with one argument changed. Copyright (c) 2025 Nous Research. MIT License: see harvested/LICENSE.hermes.
 """The update kinds this plugin asks Telegram for (docs/design.md, Turn lifecycle; slice 3).
@@ -99,6 +99,7 @@ class UpdateKindsMixin:
             listen=webhook_host, port=webhook_port, url_path=webhook_path, webhook_url=webhook_url,
             secret_token=webhook_secret, allowed_updates=allowed_updates(),
             drop_pending_updates=self._cold_boot_drop_pending(is_reconnect=is_reconnect),
+            bootstrap_retries=1,  # one transient delete/set failure must not leave the webhook unset
        )
         self._webhook_mode = True
         self._polling_progress_accepting = False

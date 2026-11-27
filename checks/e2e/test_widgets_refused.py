@@ -37,8 +37,11 @@ def test_after_telegram_refuses_the_bot_widgets_it_asks_once_and_a_new_session_h
     inbound = rig.drv.dm(f"draw the plan [in:{token}]")
     C.wait_reply(rig, inbound.chat_id, "A-wr-refused")
     assert len(rig.drv.standin.calls_of("sendWidget")) == 1  # the second call never reached Telegram
-    results = _tool_results(rig, token)
-    assert len(results) == 2 and all("does not let this bot send widgets" in r for r in results), results
+    first, again = _tool_results(rig, token)
+    assert "does not let this bot send widgets" in first, first
+    # Hermes' tool bridge checks a tool's availability on every call (hermes-agent@28ef6e4
+    # tools/tool_search.py:571), so the second call is refused by Hermes; before, the plugin refused it.
+    assert "'telegram_widget' is not available in this session" in again, again
 
     # A session that starts now is built without the tool: the bridge cannot run it, so the agent's call is
     # refused by Hermes, not by the plugin.

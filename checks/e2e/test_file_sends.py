@@ -19,7 +19,7 @@ from gateway.platforms.base import MessageEvent
 from hermes_telegram import tools
 from hermes_telegram.delivery import Receipt
 from hermes_telegram.files import GONE, LOST_REPLY
-from hermes_telegram.turn import Turn, TurnRefused
+from hermes_telegram.turn import Turn, TurnRefused, as_tool_send
 
 pytestmark = pytest.mark.e2e
 
@@ -70,6 +70,17 @@ async def test_an_album_whose_reply_was_lost_is_not_sent_again_photo_by_photo(se
     assert len(sender.standin.calls_of("sendMediaGroup")) == 1 and not sender.standin.calls_of("sendPhoto")
     assert receipts == [Receipt(path, reason=LOST_REPLY) for path, _ in photos]
     assert any("may or may not be in the chat" in _plain(t) for t in _texts(sender))
+
+
+async def test_a_file_whose_reply_was_lost_is_named_and_not_sent_again(sender, tmp_path):
+    # Hermes counts an upload whose reply was lost as sent, with no message id and no notice (it may be in the
+    # chat, hermes-agent#62079); the chat is told, as for an album.
+    doc = _doc(tmp_path / "report.pdf")
+    sender.wire.fail("sendDocument", 1, "lost")
+    result = await sender.adapter.send_document(CHAT, str(doc))
+    assert len(sender.standin.calls_of("sendDocument")) == 1
+    assert not result.success and LOST_REPLY in result.error
+    assert any(_plain(t) == f"report.pdf was not delivered: {LOST_REPLY}." for t in _texts(sender))
 
 
 async def test_an_album_telegram_refused_is_sent_photo_by_photo(sender, tmp_path):
@@ -157,7 +168,10 @@ async def test_a_notice_in_a_dm_topic_never_leaves_the_topic(sender, tmp_path):
     def to_topic(p: dict) -> bool:
         return "5" in (str(p.get("message_thread_id") or ""), str(p.get("direct_messages_topic_id") or ""))
     sender.refuse("sendMessage", "Bad Request: message thread not found", match=to_topic)  # the topic is gone
-    await _send(sender.adapter, await _turn(sender.adapter, thread_id="5"), [tmp_path / "missing.pdf"])
+    turn = await _turn(sender.adapter, thread_id="5")
+    # A tool's send (telegram_send runs _deliver under as_tool_send): Hermes' own delivery now moves a reply
+    # whose private topic is gone to the chat root (hermes-agent#95517); a tool's notice must not.
+    await as_tool_send(lambda: _send(sender.adapter, turn, [tmp_path / "missing.pdf"]))
     assert _texts(sender) == []  # no notice in the chat's root instead
 
 

@@ -98,7 +98,7 @@ class MessagesMixin:
         mine = self._bot_message(chat_id, message_id) or {}
         keyboard = markup if markup is not None else mine.get("markup")
         was_rich = mine.get("rich")
-        if was_rich is None:  # an answer: Hermes indexes the rich ones it sends
+        if was_rich is None:  # recorded before the record said so, when Hermes indexed only the rich ones it sent
             try:
                 from gateway import rich_sent_store
                 was_rich = rich_sent_store.lookup(str(chat_id), str(message_id)) is not None
@@ -132,8 +132,9 @@ class MessagesMixin:
         except Exception as exc:
             if "message is not modified" not in str(exc).lower():
                 return self._send_failed(exc, _redact_telegram_error_text(exc))
-        if was_rich:
-            await self._record_rich_sent(chat_id, message_id, text)  # Hermes' reply context for this message
+        # Hermes' quote-reply context for this message, indexed as the bundled edit indexes a final text.
+        from .harvested.telegram_split import quotable_text
+        await self._record_sent_text(chat_id, message_id, text if was_rich else quotable_text(text))
         if markup is not None:
             self._keep_keyboard(chat_id, message_id, mine, markup)
         result = SendResult(success=True, message_id=str(message_id))

@@ -266,8 +266,9 @@ class ButtonsMixin:
         result = SendResult(success=True, message_id=str(field("message_id")))
         result.raw_response = {"preview_ignored": bool(as_rich and link_preview),
                                "effect_missing": bool(effect and str(field("effect_id") or "") != str(effect))}
-        if as_rich:
-            await self._record_rich_sent(chat_id, result.message_id, text)  # Hermes' reply context for it
+        # Hermes' quote-reply context for it, indexed as the bundled sender indexes each text it sends.
+        from .harvested.telegram_split import quotable_text
+        await self._record_sent_text(chat_id, result.message_id, text if as_rich else quotable_text(body, mdv2=True))
         self._remember_bot_messages(chat_id, [result], thread_id, markup=markup, rich=as_rich)
         self._reshow_soon(chat_id, thread_id)
         return result
