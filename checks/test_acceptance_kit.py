@@ -198,6 +198,10 @@ def test_the_business_rows_flag_any_call_into_the_chat_but_a_connection_lookup()
              Call(0.0, "sendMessage", {"chat_id": 42, "text": "the owner's own chat"}, True),
              Call(0.0, "getUpdates", {}, True)]
     assert rows.into_business(calls, 4242) == ["sendMessage", "readBusinessMessage"]
+    # Review, slice 3: the rows read the raw record, where typing in the chat is a call like any other.
+    rec = Recorder(Path("unused"), "x")
+    rec.calls = [Call(5.0, "sendChatAction", {"chat_id": 4242, "action": "typing"}, True)]
+    assert rows.into_business(rows._calls(argparse.Namespace(rec=rec), 0.0), 4242) == ["sendChatAction"]
 
 
 async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: Path, monkeypatch) -> None:
@@ -206,6 +210,7 @@ async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: P
     # the acceptance home. Bugs: a row waiting for an update shape Telegram does not send; a row reading the
     # contract's output by a key it does not have.
     import asyncio
+    import sqlite3
     import time
 
     from acceptance import home
@@ -220,16 +225,18 @@ async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: P
     real_sleep = asyncio.sleep
     monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(min(s, 0.05)))
     home.prepare(owner, provider="anthropic", model="m", api="http://127.0.0.1:1", playbook="# p")
+    with sqlite3.connect(tmp_path / "hermes" / "state.db") as log:  # the agent's log, which no turn wrote to
+        log.execute("CREATE TABLE messages (timestamp REAL, content TEXT)")
     store, limits = InboxStore(tmp_path / "hermes" / STORE_NAME), Limits(72, 1000)
     rec = Recorder(tmp_path / "record.jsonl", "x")
     asked: list[str] = []
 
     async def yes(question: str) -> bool:
         asked.append(question)
-        return True
+        return not question.startswith("BL link 2")  # an honest "no" is a finding, not a failure
 
-    async def nothing(_: str) -> None:
-        return None
+    async def nothing(line: str) -> None:
+        say(line)  # B2's instruction comes with a pause: the owner sends, then presses Enter
 
     steps: list = []
 
@@ -255,6 +262,9 @@ async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: P
         store.keep_message(seen, OwnerId(owner), limits, None, int(time.time()))
 
     steps += [
+        lambda: telegram("business_connection", {"id": cid, "user": {"id": owner, "is_bot": False, "first_name": "O"},
+                                                 "user_chat_id": owner, "date": 0, "is_enabled": True,
+                                                 "rights": {"can_reply": True}}),  # B1 asks for it off first
         lambda: (telegram("business_connection", {"id": cid, "user": {"id": owner, "is_bot": False,
                                                                        "first_name": "Owner"},
                                                   "user_chat_id": owner, "date": 0, "is_enabled": True,
@@ -278,4 +288,35 @@ async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: P
     assert steps == []
     failed = [(r.row, what, detail) for r in results for what, ok, detail in r.checks if not ok]
     assert failed == []
-    assert any("resolve" in q and "second_account" in q for q in asked)  # BL offers the username's forms
+    outcomes = next(detail for r in results for what, _, detail in r.checks if what.startswith("the link"))
+    assert outcomes == ("the contract's: opens the message; openmessage: does not; resolve: opens the message; "
+                        "t.me: opens the message")  # the username's forms are offered too
+    assert all(r.passed for r in results)
+    assert not any("4242" in q or "second_account" in q for q in asked)  # no ids in what the report keeps
+
+
+def test_the_agent_log_check_tells_no_log_from_a_log_without_the_text(tmp_path: Path, monkeypatch) -> None:
+    # Review, slice 3. Bug: "no agent turn saw it" passing because the agent's log is missing.
+    import sqlite3
+
+    monkeypatch.setattr(rows, "HOME", tmp_path)
+    assert rows._agent_saw("b1-abcd", 0.0) is None
+    with sqlite3.connect(tmp_path / "state.db") as log:
+        log.execute("CREATE TABLE messages (timestamp REAL, content TEXT)")
+        log.execute("INSERT INTO messages VALUES (10.0, 'user: b1-abcd are we still on?')")
+    assert (rows._agent_saw("b1-abcd", 5.0), rows._agent_saw("b1-abcd", 20.0)) == (True, False)
+
+
+async def test_without_an_agent_log_the_row_does_not_certify_that_no_turn_saw_it(tmp_path: Path, monkeypatch) -> None:
+    # Review, slice 3. Bug: the missing log read as "nobody saw it".
+    from acceptance.recorder import Recorder
+
+    monkeypatch.setattr(rows, "HOME", tmp_path)
+    monkeypatch.setattr(rows, "QUIET", 0.01)
+    run = rows.Run(rec=Recorder(tmp_path / "record.jsonl", "x"), owner_id=42, files={}, gateway=None, ask=None,
+                   pause=None, say=lambda _: None)
+    run.result = rows.Result("B1", "t")
+    await rows._nothing_happened(run, 0.0, 4242, ["b1-abcd"])
+    assert [(what, ok, detail) for what, ok, detail in run.result.checks] == [
+        ("the bot did nothing in the chat", True, "[]"),
+        ("no agent turn saw it", False, "the acceptance home has no agent log to look in")]

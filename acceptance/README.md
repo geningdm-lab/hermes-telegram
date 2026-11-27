@@ -43,12 +43,12 @@ Rows B1 to BL are slice 3 of `docs/business-inbox.md`: the bot connected to the 
 
 | Row | The owner does | What the run checks |
 |---|---|---|
-| B1 | connects vtadevbot (Settings > Telegram Business > Chatbots: only the chat with the second account, every right off), then sends a code from the second account | the connection grants no reply; nothing the bot asked of Telegram touched that chat; no agent turn saw the text; `window` keeps it as `contact`; `status` shows the connection |
-| B2 | sends a code from the main account in that chat | whether Telegram delivers the owner's own message at all (it is not documented), and then that it is kept as `owner`, with no call and no turn |
-| B3 | edits the B1 message from the second account, then deletes it for both | both versions kept, the newest as the text; the record marked deleted with its text |
-| BL | sends one more code, then opens each printed link from Saved Messages | the contract's link is the chat link; for each candidate (`tg://user`, `tg://openmessage`, and with a username `tg://resolve?...&post=` and `t.me/<username>/<id>`), whether iOS opened the message itself |
+| B1 | removes vtadevbot from the account's chatbots if it is there, adds it (Settings > Telegram Business > Chatbots: only the chat with the second account, every right off), then sends a code from the second account | no probe until the connection grants no right at all; once the bot has made no call for 20 s, nothing it asked of Telegram (typing included) touched that chat and no agent turn saw the text; `chats` and `window` keep it as `contact`; `status` shows that connection |
+| B2 | sends a code from the main account in that chat, then presses Enter | whether Telegram delivers the owner's own message at all (it is not documented): a miss counts only while the gateway kept polling, else the row says the run was inconclusive; then that it is kept as `owner`, with no call and no turn |
+| B3 | edits the B1 message from the second account, then deletes it for both | after the edit, both versions with the newest as the text and not deleted; after the deletion, marked deleted with both versions |
+| BL | sends one more code from the second account, switches back to the main account and opens each printed link from its Saved Messages | the contract's link is the chat link; for each candidate (`tg://user`, `tg://openmessage`, and with a username `tg://resolve?...&post=` and `t.me/<username>/<id>`), whether iOS opened the message itself. Each answer is recorded as a finding: no link working is a result, not a failure |
 
-Run them in order (`run B1 B2 B3 BL`): B2 to BL use what B1 learned. Afterwards remove vtadevbot from the account's chatbots. What BL finds goes into `docs/business-inbox.md` (Read contract, `link`): a form that opens the message becomes `exact`.
+Run them in order (`run B1 B2 B3 BL`): B2 to BL use what B1 learned, and every update they wait for must come from B1's connection and chat. Afterwards remove vtadevbot from the account's chatbots. The report keeps outcomes, kinds and counts; texts, names and the links with their ids are shown on the terminal only. What BL finds goes into `docs/business-inbox.md` (Read contract, `link`): a form that opens the message becomes `exact`.
 
 ## After the runs
 

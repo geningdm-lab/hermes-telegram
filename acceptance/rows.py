@@ -20,7 +20,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 from hermes_telegram.messages import EFFECTS
 from hermes_telegram.widgets import check_widget
@@ -653,10 +653,13 @@ async def row_17(run: Run) -> None:
 #
 # The owner connects vtadevbot to their own account (Settings > Business > Chatbots) and gives it one chat only:
 # the chat with a second account the owner holds. The run sends nothing to the bot here; it watches what Telegram
-# delivers, what the bot asks of Telegram, what reached the agent, and what `hermes telegram inbox` (slice 2's
-# contract) reads back from the acceptance home.
+# delivers, every call the bot makes (typing included), what reached the agent, and what `hermes telegram inbox`
+# (slice 2's contract) reads back from the acceptance home. The report gets outcomes, kinds and counts, never a
+# record's text, a name or a link with ids: those stay on the terminal and in the private record.
 
-_BUSINESS: dict[str, Any] = {}  # what B1 learned, for the rows after it: the connection and the other account
+_BUSINESS: dict[str, Any] = {}  # what B1 learned, for the rows after it
+QUIET = 20.0  # seconds without a new call before a row's "nothing happened" is final
+_INBOX_ENV = ("HERMES_TELEGRAM_INBOX_RETENTION_HOURS", "HERMES_TELEGRAM_INBOX_MAX_PER_CHAT")
 
 
 async def inbox(*args: str) -> dict[str, Any]:
@@ -666,7 +669,8 @@ async def inbox(*args: str) -> dict[str, Any]:
 
 
 def _inbox(*args: str) -> dict[str, Any]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TELEGRAM_"))}
+    # The gateway's own limit overrides, if any, so the reader purges by the same limits as the writer.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TELEGRAM_")) or k in _INBOX_ENV}
     env["HERMES_HOME"] = str(HOME)
     done = subprocess.run([sys.executable, "-m", "hermes_cli.main", "telegram", "inbox", *args], env=env,
                           cwd=str(HOME), capture_output=True, text=True, timeout=120)
@@ -675,19 +679,38 @@ def _inbox(*args: str) -> dict[str, Any]:
 
 def into_business(calls: list[Call], contact: int) -> list[str]:
     """The methods the bot called on the Business path: in the chat with ``contact``, or naming a connection.
-    Only ``getBusinessConnection`` is allowed (B7)."""
+    Only ``getBusinessConnection`` is allowed (B7). Give it the raw record: typing counts too."""
     return [c.method for c in calls if c.method != "getBusinessConnection"
             and (c.params.get("business_connection_id") or str(c.params.get("chat_id")) == str(contact))]
 
 
-def agent_saw(text: str, since: float) -> bool:
-    """Whether any session of the acceptance home, not only the owner's chat, recorded ``text`` since ``since``."""
+async def agent_saw(text: str, since: float) -> Optional[bool]:
+    """Whether any session of the acceptance home recorded ``text`` since ``since``; None when there is no agent
+    log to look in. Read in a thread, off the proxy's loop."""
+    return await asyncio.to_thread(_agent_saw, text, since)
+
+
+def _agent_saw(text: str, since: float) -> Optional[bool]:
     db = HOME / "state.db"
     if not db.exists():
-        return False
-    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+        return None
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0) as conn:
         return conn.execute("SELECT 1 FROM messages WHERE timestamp >= ? AND instr(content, ?) > 0 LIMIT 1",
                             (since, text)).fetchone() is not None
+
+
+def _calls(run: Run, since: float) -> list[Call]:
+    """Every call since ``since`` as the proxy recorded it, ``sendChatAction`` included."""
+    return [c for c in run.rec.calls if c.at >= since]
+
+
+async def _until(found: Callable[[], Awaitable[Any]], timeout: float = 30.0) -> Any:
+    deadline = time.monotonic() + timeout
+    while True:
+        value = await found()
+        if value or time.monotonic() > deadline:
+            return value
+        await asyncio.sleep(1.0)
 
 
 async def _delivered(run: Run, kind: str, instruction: str, since: float, match: Callable[[Update], bool],
@@ -698,114 +721,190 @@ async def _delivered(run: Run, kind: str, instruction: str, since: float, match:
                                   timeout=timeout, what=instruction)
 
 
-def _from(update: Update) -> int | None:
+def _from(update: Update) -> Optional[int]:
     return (update.body.get("from") or {}).get("id")
 
 
-async def _kept(contact: int, owner: int, text: str) -> list[dict[str, Any]]:
-    records = (await inbox("window", "--chat", f"{owner}.{contact}", "--limit", "1000")).get("records") or []
-    return [r for r in records if any(v.get("text") == text for v in r.get("versions") or ())]
+def _in_chat(update: Update) -> bool:
+    """An update of B1's connection, in the chat with the second account."""
+    body = update.body
+    return (body.get("business_connection_id") == _BUSINESS.get("connection")
+            and (body.get("chat") or {}).get("id") == _BUSINESS.get("contact"))
 
 
-def _business_context(run: Run) -> tuple[int, str]:
+async def _find(text: str) -> Optional[tuple[str, dict[str, Any]]]:
+    """The chat ref and the record holding ``text`` in one of its versions, through the contract's own refs; None
+    while the inbox holds no such record."""
+    for chat in (await inbox("chats")).get("chats") or ():
+        for record in (await inbox("window", "--chat", chat["chat"], "--limit", "1000")).get("records") or ():
+            if any(v.get("text") == text for v in record.get("versions") or ()):
+                return chat["chat"], record
+    return None
+
+
+async def _record(chat: str, ref: str) -> Optional[dict[str, Any]]:
+    records = (await inbox("window", "--chat", chat, "--limit", "1000")).get("records") or ()
+    return next((r for r in records if r.get("ref") == ref), None)
+
+
+def _shape(record: Optional[dict[str, Any]]) -> str:
+    """A record for the report: its kinds and counts, never its text or names."""
+    if not record:
+        return "no record"
+    return (f"author={record.get('author')}, versions={len(record.get('versions') or ())}, "
+            f"deleted={record.get('deleted') is not None}")
+
+
+async def _nothing_happened(run: Run, since: float, contact: int, texts: list[str]) -> None:
+    """Once the bot has made no call for ``QUIET`` s: no call into the chat, and no agent turn saw ``texts``."""
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        count = len(_calls(run, since))
+        await asyncio.sleep(QUIET)
+        if len(_calls(run, since)) == count:
+            break
+    calls = into_business(_calls(run, since), contact)
+    run.check("the bot did nothing in the chat", calls == [], calls)
+    seen = [await agent_saw(text, since) for text in texts]
+    run.check("no agent turn saw it", all(s is False for s in seen),
+              "the acceptance home has no agent log to look in" if None in seen else "")
+
+
+def _business_context() -> tuple[int, str]:
     if "contact" not in _BUSINESS:
         raise RuntimeError("run B1 first: it connects the bot and learns the second account")
     return _BUSINESS["contact"], _BUSINESS["token"]
+
+
+def _granted(update: Update) -> list[str]:
+    return sorted(k for k, v in (update.body.get("rights") or {}).items() if v)
 
 
 @row("B1", "A message from the other person in a connected chat is kept, and nobody answers it")
 async def row_b1(run: Run) -> None:
     since = time.time()
     token = secrets.token_hex(2)
+
+    def owners(update: Update) -> bool:
+        return (update.body.get("user") or {}).get("id") == run.owner_id and bool(update.body.get("is_enabled"))
+    run.say("    If vtadevbot is among your chatbots already, remove it first: Telegram announces a connection "
+            "when the bot is added or its settings change.")
     connected = await _delivered(
         run, "business_connection",
         "Settings > Telegram Business > Chatbots: add vtadevbot. Under chats, choose only the chat with your second "
-        "account; turn every right off (replying in particular).", since,
-        lambda u: (u.body.get("user") or {}).get("id") == run.owner_id and u.body.get("is_enabled"))
-    rights = connected.body.get("rights") or {}
-    run.check("the connection grants no right to reply", not rights.get("can_reply"), rights)
+        "account; turn every right off.", since, owners)
+    while _granted(connected):  # the live condition is every right off: no probe before it holds
+        connected = await _delivered(run, "business_connection", "in vtadevbot's chatbot settings, turn off: "
+                                     + ", ".join(_granted(connected)), connected.at + 0.001, owners)
+    _BUSINESS.clear()
+    _BUSINESS.update(connection=connected.body.get("id"), token=token)
     code = f"b1-{token} are we still on for dinner?"
     message = await _delivered(run, "business_message", f"from your second account, send this account:  {code}",
                                connected.at, lambda u: _norm(u.body.get("text")) == _norm(code)
-                               and _from(u) != run.owner_id)
-    contact = int(message.body["chat"]["id"])
-    _BUSINESS.update(contact=contact, token=token, b1=int(message.body["message_id"]),
+                               and _from(u) != run.owner_id
+                               and u.body.get("business_connection_id") == _BUSINESS["connection"])
+    text = message.body["text"]  # as delivered: the checks after this compare it exactly
+    _BUSINESS.update(contact=int(message.body["chat"]["id"]), b1=int(message.body["message_id"]), b1_text=text,
                      username=(message.body.get("from") or {}).get("username"))
-    await asyncio.sleep(20)  # time for any turn or send it might wrongly start
-    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [],
-              into_business(run.rec.sent(since), contact))
-    run.check("no agent turn saw it", not agent_saw(code, since))
-    kept = await _kept(contact, run.owner_id, code)
-    run.check("the inbox keeps it as the other person's", [r.get("author") for r in kept] == ["contact"], kept)
+    chat, record = await _until(lambda: _find(text)) or (None, None)
+    _BUSINESS.update(chat=chat, b1_ref=(record or {}).get("ref"))
+    run.check("the inbox keeps it as the other person's", (record or {}).get("author") == "contact", _shape(record))
     status = await inbox("status")
-    run.check("status shows the connection, enabled, with replying off",
-              any(c.get("enabled") and not c["rights"].get("can_reply") for c in status.get("connections") or ()),
-              status.get("connections"))
-    await run.observe("B1: does the chat with your second account show no reply, and no 'read' mark the bot made? "
+    run.check("status shows that connection, enabled, with every right off",
+              any(c.get("connection") == _BUSINESS["connection"] and c.get("enabled")
+                  and not any((c.get("rights") or {}).values()) for c in status.get("connections") or ()))
+    await run.observe("B1: does the chat with your second account show no reply and no 'read' mark the bot made? "
                       "And did the bot send nothing in its own chat with you?")
+    await _nothing_happened(run, since, _BUSINESS["contact"], [text])
 
 
 @row("B2", "The owner's own message in that chat is kept as the owner's")
 async def row_b2(run: Run) -> None:
-    contact, token = _business_context(run)
+    contact, token = _business_context()
     since = time.time()
     code = f"b2-{token} yes, at 8"
-    try:
-        await _delivered(run, "business_message", f"from this account, in the chat with your second account, send:  "
-                         f"{code}", since, lambda u: _norm(u.body.get("text")) == _norm(code)
-                         and _from(u) == run.owner_id, timeout=180)
-        delivered = True
+
+    def mine(update: Update) -> bool:
+        return _norm(update.body.get("text")) == _norm(code) and _from(update) == run.owner_id and _in_chat(update)
+    await run.pause(f">>> On iOS: switch to this account (your main one) and, in its chat with your second account, "
+                    f"send:  {code}\n    Then press Enter here.")
+    sent = time.time()
+    try:  # counted from the instruction: a quick delivery may come before the Enter
+        message = await run.rec.wait_for(lambda: next((u for u in run.rec.delivered(since, "business_message")
+                                                        if mine(u)), None), timeout=60, what="the owner's message")
     except TimeoutError:
-        delivered = False
+        message = None
+    polled = any(c.method == "getUpdates" and c.ok and (c.done or c.at) >= sent for c in run.rec.calls)
     # Telegram does not document that a connected bot receives the account's own messages (docs/business-inbox.md).
-    run.check("Telegram delivered the owner's own message to the bot", delivered)
-    await asyncio.sleep(10)
-    if delivered:
-        run.check("the inbox keeps it as the owner's", [r.get("author") for r in await _kept(contact, run.owner_id, code)]
-                  == ["owner"])
-    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [])
-    run.check("no agent turn saw it", not agent_saw(code, since))
+    if message is None and not polled:
+        run.check("the gateway polled Telegram while the message was awaited (else the run is inconclusive)", False)
+        return
+    run.check("Telegram delivered the owner's own message to the bot", message is not None)
+    texts = [code]
+    if message is not None:
+        text = message.body["text"]
+        texts = [text]
+        _, record = await _until(lambda: _find(text)) or (None, None)
+        run.check("the inbox keeps it as the owner's", (record or {}).get("author") == "owner", _shape(record))
+    await _nothing_happened(run, since, contact, texts)
 
 
 @row("B3", "An edit adds a version; a deletion marks the record and keeps its text")
 async def row_b3(run: Run) -> None:
-    contact, token = _business_context(run)
+    contact, token = _business_context()
     since = time.time()
-    original = f"b1-{token} are we still on for dinner?"
-    edited = f"b1-{token} are we still on, at 9?"
-    b1 = _BUSINESS["b1"]
-    await _delivered(run, "edited_business_message", f"on your second account, edit the B1 message to:  {edited}",
-                     since, lambda u: u.body.get("message_id") == b1 and _norm(u.body.get("text")) == _norm(edited))
+    original, b1 = _BUSINESS["b1_text"], _BUSINESS["b1"]
+    asked = f"b1-{token} are we still on, at 9?"
+    edit = await _delivered(run, "edited_business_message", f"on your second account, edit the B1 message to:  {asked}",
+                            since, lambda u: _in_chat(u) and u.body.get("message_id") == b1
+                            and _norm(u.body.get("text")) == _norm(asked))
+    edited = edit.body["text"]
+
+    async def versions_are(texts: list[str]) -> Optional[dict[str, Any]]:
+        record = await _record(_BUSINESS["chat"], _BUSINESS["b1_ref"])
+        return record if record and [v.get("text") for v in record.get("versions") or ()] == texts else None
+    record = await _until(lambda: versions_are([original, edited]))
+    run.check("after the edit: both versions, the newest as the text, not deleted",
+              bool(record) and record.get("text") == edited and record.get("deleted") is None, _shape(record))
     await _delivered(run, "deleted_business_messages", "on your second account, delete that message for both of you.",
-                     since, lambda u: b1 in (u.body.get("message_ids") or ()))
-    await asyncio.sleep(5)
-    kept = await _kept(contact, run.owner_id, original)
-    run.check("both versions, the newest as the text", [[v.get("text") for v in r["versions"]] for r in kept]
-              == [[original, edited]] and kept[0].get("text") == edited, kept)
-    run.check("marked deleted, its text kept", bool(kept) and kept[0].get("deleted") is not None, kept)
-    run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [])
+                     edit.at, lambda u: u.body.get("business_connection_id") == _BUSINESS["connection"]
+                     and (u.body.get("chat") or {}).get("id") == contact and b1 in (u.body.get("message_ids") or ()))
+
+    async def deleted() -> Optional[dict[str, Any]]:
+        record = await _record(_BUSINESS["chat"], _BUSINESS["b1_ref"])
+        return record if record and record.get("deleted") is not None else None
+    record = await _until(deleted)
+    run.check("after the deletion: marked deleted, both versions kept",
+              bool(record) and [v.get("text") for v in record.get("versions") or ()] == [original, edited],
+              _shape(record))
+    await _nothing_happened(run, since, contact, [edited])
 
 
 @row("BL", "Which link opens a kept message on iOS")
 async def row_bl(run: Run) -> None:
-    contact, token = _business_context(run)
+    contact, token = _business_context()
     since = time.time()
     code = f"bl-{token} the link test"
     message = await _delivered(run, "business_message", f"from your second account, send this account:  {code}",
-                               since, lambda u: _norm(u.body.get("text")) == _norm(code) and _from(u) != run.owner_id)
-    await asyncio.sleep(5)
-    [record] = await _kept(contact, run.owner_id, code) or [{}]
-    run.check("the contract links the other person", record.get("link") ==
-              {"kind": "chat", "url": f"tg://user?id={contact}"}, record.get("link"))
+                               since, lambda u: _in_chat(u) and _norm(u.body.get("text")) == _norm(code)
+                               and _from(u) != run.owner_id)
+    _, record = await _until(lambda: _find(message.body["text"])) or (None, None)
+    run.check("the contract links the other person",
+              (record or {}).get("link") == {"kind": "chat", "url": f"tg://user?id={contact}"})
     mid, username = int(message.body["message_id"]), _BUSINESS.get("username")
     candidates = [("the contract's", f"tg://user?id={contact}"),
                   ("openmessage", f"tg://openmessage?user_id={contact}&message_id={mid}")]
     if username:
         candidates += [("resolve", f"tg://resolve?domain={username}&post={mid}"),
                        ("t.me", f"https://t.me/{username}/{mid}")]
-    run.say("\n    Paste these into Saved Messages on iOS and tap each, in order:")
-    for name, url in candidates:
-        run.say(f"      {name}:  {url}")
-    for name, url in candidates:
-        await run.observe(f"BL {name} link ({url}): did it open the message `{code}` itself, highlighted in the chat?")
-    await run.pause("Last: Settings > Telegram Business > Chatbots, remove vtadevbot (or keep it for another run).")
+    run.say("\n    Switch back to this account (your main one). In its Saved Messages, paste each link below, then tap "
+            f"it. Each should open the message `{code}` from your second account, in your chat with that account:")
+    for n, (name, url) in enumerate(candidates, 1):
+        run.say(f"      {n}. {name}:  {url}")
+    outcomes = []
+    for n, (name, _url) in enumerate(candidates, 1):
+        opened = await run.ask(f"BL link {n} ({name}): did it open that message itself, in the chat?")
+        outcomes.append(f"{name}: {'opens the message' if opened else 'does not'}")
+    # An answer is a finding, not a pass or a fail: that no link works is a result too.
+    run.check("the link experiment ran on every candidate", len(outcomes) == len(candidates), "; ".join(outcomes))
+    await run.pause("Last: Settings > Telegram Business > Chatbots, remove vtadevbot. The next run adds it again.")
