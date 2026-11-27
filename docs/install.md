@@ -20,7 +20,7 @@ The profile must load plugins in the gateway process, which is Hermes' default (
 3. Restart the gateway and check Hermes' INFO log, `$HERMES_HOME/logs/gateway.log` (the console shows only warnings), for the line the plugin writes when it builds the adapter:
 
    ```text
-   hermes-telegram 0.1.0: Telegram adapter HermesTelegramAdapter from <HERMES_HOME>/plugins/platforms/telegram
+   hermes-telegram 0.2.0: Telegram adapter HermesTelegramAdapter from <HERMES_HOME>/plugins/platforms/telegram
    ```
 
    Only this line shows the plugin serves Telegram. Discovery's `shadows the bundled copy` line is written before the plugin is enabled or registered, and it also appears when Telegram ends up with no adapter.

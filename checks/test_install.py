@@ -62,3 +62,17 @@ def test_install_decides_which_adapter_telegram_gets(tmp_path: Path, installed: 
     home = tmp_path / "home"
     _install(home / ".hermes", installed=installed, enabled=enabled)
     assert _probe(home) == expected
+
+
+def test_the_version_is_one_everywhere_it_is_declared():
+    # The adapter line operators look for (docs/install.md) names the version the plugin logs.
+    import re
+    import tomllib
+
+    from hermes_telegram.plugin import VERSION
+
+    root = Path(__file__).resolve().parents[1]
+    (manifest,) = re.findall(r"^version: (\S+)$", (root / "hermes_telegram" / "plugin.yaml").read_text(), re.M)
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    assert manifest == project["version"] == VERSION
+    assert f"hermes-telegram {VERSION}: Telegram adapter" in (root / "docs" / "install.md").read_text()
