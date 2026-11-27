@@ -340,7 +340,7 @@ Replies and effects:
 | [P2] A quote in a turn a tap started reserves slots and fails | refused before anything is reserved: such a turn has no message text; same test |
 | [P2] An effect Telegram did not apply reads as success | `0` (no effect) is refused; a message returned without the effect asked for is reported; the stand-in returns `effect_id` as Telegram does; `test_an_effect_telegram_did_not_apply_is_reported_and_no_effect_is_refused` |
 
-## Business inbox, slice 1
+## Business inbox, slice 1, PR #16
 
 Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:origin/main` at `5d3f27f`, 2026-11-27 (docs/business-inbox.md). Twenty findings: nineteen accepted and fixed, one accepted in part. The tests named are in `checks/test_business_inbox.py`, or `checks/e2e/test_business_inbox.py` where marked e2e; each was checked against a mutation of its fix unless the row says otherwise.
 
