@@ -659,8 +659,13 @@ async def row_17(run: Run) -> None:
 _BUSINESS: dict[str, Any] = {}  # what B1 learned, for the rows after it: the connection and the other account
 
 
-def inbox(*args: str) -> dict[str, Any]:
-    """``hermes telegram inbox ...`` in the acceptance home, as a reader would run it."""
+async def inbox(*args: str) -> dict[str, Any]:
+    """``hermes telegram inbox ...`` in the acceptance home, as a reader would run it; in a thread, so the
+    recording proxy on this event loop keeps passing the gateway's calls meanwhile."""
+    return await asyncio.to_thread(_inbox, *args)
+
+
+def _inbox(*args: str) -> dict[str, Any]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TELEGRAM_"))}
     env["HERMES_HOME"] = str(HOME)
     done = subprocess.run([sys.executable, "-m", "hermes_cli.main", "telegram", "inbox", *args], env=env,
@@ -697,8 +702,8 @@ def _from(update: Update) -> int | None:
     return (update.body.get("from") or {}).get("id")
 
 
-def _kept(contact: int, owner: int, text: str) -> list[dict[str, Any]]:
-    records = inbox("window", "--chat", f"{owner}.{contact}", "--limit", "1000").get("records") or []
+async def _kept(contact: int, owner: int, text: str) -> list[dict[str, Any]]:
+    records = (await inbox("window", "--chat", f"{owner}.{contact}", "--limit", "1000")).get("records") or []
     return [r for r in records if any(v.get("text") == text for v in r.get("versions") or ())]
 
 
@@ -730,9 +735,9 @@ async def row_b1(run: Run) -> None:
     run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [],
               into_business(run.rec.sent(since), contact))
     run.check("no agent turn saw it", not agent_saw(code, since))
-    kept = _kept(contact, run.owner_id, code)
+    kept = await _kept(contact, run.owner_id, code)
     run.check("the inbox keeps it as the other person's", [r.get("author") for r in kept] == ["contact"], kept)
-    status = inbox("status")
+    status = await inbox("status")
     run.check("status shows the connection, enabled, with replying off",
               any(c.get("enabled") and not c["rights"].get("can_reply") for c in status.get("connections") or ()),
               status.get("connections"))
@@ -756,7 +761,7 @@ async def row_b2(run: Run) -> None:
     run.check("Telegram delivered the owner's own message to the bot", delivered)
     await asyncio.sleep(10)
     if delivered:
-        run.check("the inbox keeps it as the owner's", [r.get("author") for r in _kept(contact, run.owner_id, code)]
+        run.check("the inbox keeps it as the owner's", [r.get("author") for r in await _kept(contact, run.owner_id, code)]
                   == ["owner"])
     run.check("the bot did nothing in the chat", into_business(run.rec.sent(since), contact) == [])
     run.check("no agent turn saw it", not agent_saw(code, since))
@@ -774,7 +779,7 @@ async def row_b3(run: Run) -> None:
     await _delivered(run, "deleted_business_messages", "on your second account, delete that message for both of you.",
                      since, lambda u: b1 in (u.body.get("message_ids") or ()))
     await asyncio.sleep(5)
-    kept = _kept(contact, run.owner_id, original)
+    kept = await _kept(contact, run.owner_id, original)
     run.check("both versions, the newest as the text", [[v.get("text") for v in r["versions"]] for r in kept]
               == [[original, edited]] and kept[0].get("text") == edited, kept)
     run.check("marked deleted, its text kept", bool(kept) and kept[0].get("deleted") is not None, kept)
@@ -789,7 +794,7 @@ async def row_bl(run: Run) -> None:
     message = await _delivered(run, "business_message", f"from your second account, send this account:  {code}",
                                since, lambda u: _norm(u.body.get("text")) == _norm(code) and _from(u) != run.owner_id)
     await asyncio.sleep(5)
-    [record] = _kept(contact, run.owner_id, code) or [{}]
+    [record] = await _kept(contact, run.owner_id, code) or [{}]
     run.check("the contract links the other person", record.get("link") ==
               {"kind": "chat", "url": f"tg://user?id={contact}"}, record.get("link"))
     mid, username = int(message.body["message_id"]), _BUSINESS.get("username")

@@ -1,6 +1,6 @@
 # Design: Business inbox
 
-Status: design approved (PR #15, 2026-11-27); slice 1 built (PR #16), slice 2 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
+Status: design approved (PR #15, 2026-11-27); slices 1 and 2 built (PR #16, PR #17); slice 3's acceptance kit built, its live run pending. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
 
 ## Why
 
@@ -131,7 +131,7 @@ Each slice is one pull request to `main`, reviewed by the owner.
 
 1. Intake and storage: B1, B3 to B7, B9, B10. The Bot API stand-in learns to deliver the four business updates and to answer `getBusinessConnection`. Proved on the pin: the group -20 handler sees business updates through the harvested `TelegramApplication`, and no later group, and no agent, sees them (`checks/test_business_inbox.py`, `checks/e2e/test_business_inbox.py`). Built in `hermes_telegram/inbox.py`.
 2. Read contract: B8. Proved on the pin: `hermes telegram` registers from this plugin, which `register` adds with `ctx.register_cli_command`, and reads the profile's own `extra` through `load_gateway_config` (`checks/test_business_inbox_cli.py` runs the real `hermes` executable on a throwaway home). Built in `hermes_telegram/inbox_cli.py`.
-3. Live acceptance of B1 to B3 on `vtadevbot`, and the link test.
+3. Live acceptance of B1 to B3 on `vtadevbot`, and the link test. The kit's rows B1, B2, B3 and BL (`acceptance/rows.py`, `acceptance/README.md`, The Business inbox rows) watch what Telegram delivers, what the bot asks of Telegram, what reached the agent and what `hermes telegram inbox` reads back; a dry run on synthetic updates checks them offline (`checks/test_acceptance_kit.py`). The live run needs the owner, a second Telegram account the owner holds, and the host's `vtadevbot` gateway stopped. Its findings (whether the owner's own messages arrive, whether updates arrive with every right off, which link opens a message) are recorded here when it has run.
 
 ## Decisions and open questions
 

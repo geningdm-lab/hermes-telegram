@@ -198,3 +198,84 @@ def test_the_business_rows_flag_any_call_into_the_chat_but_a_connection_lookup()
              Call(0.0, "sendMessage", {"chat_id": 42, "text": "the owner's own chat"}, True),
              Call(0.0, "getUpdates", {}, True)]
     assert rows.into_business(calls, 4242) == ["sendMessage", "readBusinessMessage"]
+
+
+async def test_the_business_rows_pass_a_dry_run_on_synthetic_updates(tmp_path: Path, monkeypatch) -> None:
+    # Rows B1 to BL offline, before an owner spends a live session on them. Telegram's updates are synthetic and
+    # the inbox is written as the gateway would; the rows read it back with the real `hermes telegram inbox` from
+    # the acceptance home. Bugs: a row waiting for an update shape Telegram does not send; a row reading the
+    # contract's output by a key it does not have.
+    import asyncio
+    import time
+
+    from acceptance import home
+    from acceptance.recorder import Recorder, Update
+    from hermes_telegram.inbox import (ChatId, ConnectionId, ConnectionSeen, InboxStore, Limits, MessageId,
+                                       MessageSeen, MessagesDeleted, OwnerId, STORE_NAME)
+
+    owner, contact, cid = 42, 4242, ConnectionId("bc-live")
+    monkeypatch.setattr(home, "HOME", tmp_path / "hermes")
+    monkeypatch.setattr(rows, "HOME", tmp_path / "hermes")
+    monkeypatch.setattr(rows.secrets, "token_hex", lambda n: "abcd")
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(min(s, 0.05)))
+    home.prepare(owner, provider="anthropic", model="m", api="http://127.0.0.1:1", playbook="# p")
+    store, limits = InboxStore(tmp_path / "hermes" / STORE_NAME), Limits(72, 1000)
+    rec = Recorder(tmp_path / "record.jsonl", "x")
+    asked: list[str] = []
+
+    async def yes(question: str) -> bool:
+        asked.append(question)
+        return True
+
+    async def nothing(_: str) -> None:
+        return None
+
+    steps: list = []
+
+    def say(line: str) -> None:  # the owner does what each instruction says, a moment after reading it
+        if ">>> On iOS" in line:
+            asyncio.get_running_loop().call_later(0.2, steps.pop(0))
+
+    run = rows.Run(rec=rec, owner_id=owner, files={}, gateway=None, ask=yes, pause=nothing, say=say)
+    ids = iter(range(100, 200))
+
+    def telegram(kind: str, body: dict) -> None:
+        rec.updates.append(Update(time.time(), {"update_id": next(ids), kind: body}))
+
+    def message(mid: int, sender: int, text: str, edited: int = 0) -> None:
+        body = {"message_id": mid, "date": int(time.time()), "business_connection_id": cid, "text": text,
+                "chat": {"id": contact, "type": "private", "first_name": "Second"},
+                "from": {"id": sender, "is_bot": False, "first_name": "x", "username": "second_account"}}
+        telegram("edited_business_message" if edited else "business_message", {**body, **({"edit_date": edited}
+                                                                                          if edited else {})})
+        seen = MessageSeen(connection=cid, chat=ChatId(contact), chat_name="Second", message=MessageId(mid),
+                           sender=sender, sender_name="x", via_bot=False, date=body["date"], edited=edited, text=text,
+                           reply_to=None, forwarded=False, offline=False, attachments=(), media_group=None)
+        store.keep_message(seen, OwnerId(owner), limits, None, int(time.time()))
+
+    steps += [
+        lambda: (telegram("business_connection", {"id": cid, "user": {"id": owner, "is_bot": False,
+                                                                       "first_name": "Owner"},
+                                                  "user_chat_id": owner, "date": 0, "is_enabled": True,
+                                                  "rights": {}}),
+                 store.save_connection(ConnectionSeen(cid, OwnerId(owner), True, {}), None, int(time.time()))),
+        lambda: message(7, contact, "b1-abcd are we still on for dinner?"),
+        lambda: message(8, owner, "b2-abcd yes, at 8"),
+        lambda: message(7, contact, "b1-abcd are we still on, at 9?", edited=int(time.time()) + 1),
+        lambda: (telegram("deleted_business_messages", {"business_connection_id": cid, "message_ids": [7],
+                                                         "chat": {"id": contact, "type": "private"}}),
+                 store.mark_deleted(MessagesDeleted(cid, ChatId(contact), (MessageId(7),)), OwnerId(owner),
+                                    limits, None, int(time.time()))),
+        lambda: message(9, contact, "bl-abcd the link test"),
+    ]
+    results = []
+    for key in ("B1", "B2", "B3", "BL"):
+        title, fn = rows.ROWS[key]
+        run.result = rows.Result(key, title)
+        await fn(run)
+        results.append(run.result)
+    assert steps == []
+    failed = [(r.row, what, detail) for r in results for what, ok, detail in r.checks if not ok]
+    assert failed == []
+    assert any("resolve" in q and "second_account" in q for q in asked)  # BL offers the username's forms

@@ -8,7 +8,7 @@ Slice 0 of [docs/design.md](docs/design.md): the plugin loads in place of the bu
 
 This repository is the Claude Code counterpart of the Prism attempt in `geningdm-lab/lumi-telegram`. Both work to the same acceptance rows.
 
-A second feature, the Business inbox, has its own design in [docs/business-inbox.md](docs/business-inbox.md): a short-lived base of the owner's private chats, kept through Telegram Business and read with `hermes telegram inbox`. Slices 1 and 2, intake, storage and the read command, are built; live acceptance is slice 3.
+A second feature, the Business inbox, has its own design in [docs/business-inbox.md](docs/business-inbox.md): a short-lived base of the owner's private chats, kept through Telegram Business and read with `hermes telegram inbox`. Slices 1 and 2, intake, storage and the read command, are built; slice 3's live acceptance rows are in `acceptance/`, waiting for a live run.
 
 ## Layout
 
