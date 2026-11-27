@@ -339,3 +339,52 @@ Replies and effects:
 | [P2] A quote loses the formatting Telegram matches | the turn keeps the user's text and entities; a quote carries the entities over its span (`quote_parts`); a quote of the bot's own messages, whose entities and rich blocks are not kept, is refused; `test_a_quote_carries_the_formatting_telegram_matches`, `test_a_quote_telegram_would_not_match_is_refused_before_anything_is_reserved` |
 | [P2] A quote in a turn a tap started reserves slots and fails | refused before anything is reserved: such a turn has no message text; same test |
 | [P2] An effect Telegram did not apply reads as success | `0` (no effect) is refused; a message returned without the effect asked for is reported; the stand-in returns `effect_id` as Telegram does; `test_an_effect_telegram_did_not_apply_is_reported_and_no_effect_is_refused` |
+
+## Business inbox, slice 1, PR #16
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:origin/main` at `5d3f27f`, 2026-11-27 (docs/business-inbox.md). Twenty findings: nineteen accepted and fixed, one accepted in part. The tests named are in `checks/test_business_inbox.py`, or `checks/e2e/test_business_inbox.py` where marked e2e; each was checked against a mutation of its fix unless the row says otherwise.
+
+### Accepted and fixed
+
+Who may write:
+
+| Finding | Fix |
+|---|---|
+| [P1] Reauthorize stored connections against the current owner map | a kept connection counts only while its owner is the configured one; `test_a_kept_connection_of_an_owner_no_longer_configured_keeps_nothing_new` |
+| [P1] Order connection lookups, state updates, and message admission | one lookup or connection update at a time per connection (`_connection_lock`), and the connection checked enabled inside each write; `test_a_disconnect_during_a_lookup_is_not_undone_by_the_lookups_answer`, `test_a_connection_that_is_not_enabled_keeps_nothing` |
+| [P1] Reserve the business handler's place in dispatch | the handler matches business updates only and is kept first in its group after registering and after a late plugin wire (`_wire_plugin_handlers`); `test_a_native_plugins_catch_all_in_the_business_group_does_not_get_business_updates` |
+| [P3] Drop non-private deletions before resolving their connection | a deletion outside a private chat is skipped before any lookup; `test_a_connection_keeps_every_right_and_a_deletion_outside_a_private_chat_is_skipped` |
+
+Retention and logs:
+
+| Finding | Fix |
+|---|---|
+| [P1] Keep expiring existing records when intake is switched off | the purge task runs whenever the file exists, with the limits the file was last written under when intake is off; `test_a_file_keeps_expiring_after_intake_is_switched_off` |
+| [P1] Redact business payloads before PTB logs them | a filter on python-telegram-bot's loggers drops DEBUG records that carry a business update or connection, installed when the plugin loads, whether intake is on or not; `test_debug_records_of_business_payloads_are_dropped` |
+| [P2] Stop the purge worker when its adapter disconnects | the task belongs to one Application and returns at its next wake once the adapter's `_app` is another, before purging; a new Application starts its own; `test_the_purge_ends_with_the_adapters_application` |
+| [P2] Evict the oldest message by Telegram date | the cap ranks by date, then message id, and records read in that order; `test_a_chat_keeps_its_newest_records_by_telegram_date_up_to_the_cap` |
+| [P2] Do not report an insert that the cap immediately removes | a message older than every record a full chat keeps is not kept and moves no cursor; same test |
+
+Records and replays:
+
+| Finding | Fix |
+|---|---|
+| [P2] Distinguish different edits made in the same second | a version is keyed by edit time and a digest of its content; `test_edits_in_the_same_second_are_both_kept_and_a_late_older_edit_does_not_set_the_media` |
+| [P2] Preserve the newest attachment metadata on late edits | only an edit at least as new as every kept one sets the record's media; same test |
+| [P2] Detect replays before mutating inbox state | each write records the update's id with the bot's id, in its transaction, for the retention period; the chat's name changes only with a change; `test_an_update_applied_once_is_not_applied_again_after_a_restart` |
+| [P2] Bound change history as well as version text | a record keeps its newest 51 changes; older ones advance the gap mark; `test_a_records_versions_and_changes_stay_bounded_under_many_edits` |
+| [P2] Read records and versions from one SQLite snapshot | both reads in one transaction. No test: a purge between the two reads cannot be placed there from outside the store |
+| [P2] Preserve all granted business rights | every `can_*` field of BusinessBotRights is kept; same test as the deletion row |
+| [P2] Reject numeric settings that cannot be parsed or stored | ASCII digits only, bounded (ten years of hours, a million records, an owner id below 2^53); `test_unusable_settings_are_refused` |
+| [P3] Check the schema version before modifying an existing file | an existing file's schema is read before anything is written; a file of another schema or of something else is refused unchanged; `test_a_file_of_another_schema_is_refused_unchanged` |
+
+End to end:
+
+| Finding | Fix |
+|---|---|
+| [P2] Check all Bot API calls in the business-only test interval | after the command menu registers, every call while the business updates are handled must be `getUpdates` or `getBusinessConnection`; a photo is among them, so a `getFile` would show (e2e) |
+| [P2] Wait for each business lane before asserting absence of effects | each business update's handling is awaited by the admission's own log line for it, then the gateway is made idle by a barrier before the model's requests are checked (e2e); not mutation-checked |
+
+### Accepted in part
+
+**[P1] Enforce the single-owner, default-profile configuration.** Accepted: exactly one owner (decision 5), `test_unusable_settings_are_refused`. Disputed: requiring the literal profile name `default`. The design's rule is that the inbox lives in the home of the profile whose adapter receives the updates, never another profile's ("In this version that must be the adapter's own profile, `default`"). In the deployment the bot belongs to `default` (homelab's runbook for the second profile), so the check against the adapter's own profile is the same check there, and the literal name would only refuse that setup on a host where the bot's profile has another name. Reopens if the owner wants the inbox tied to the name `default` whatever profile owns the bot.

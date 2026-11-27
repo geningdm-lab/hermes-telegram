@@ -30,6 +30,7 @@ class Bot:
         self._ids = iter(range(900, 10_000))
         self.sticker_sets: dict[str, list[str]] = {}
         self.drop_effect = False  # Telegram delivered a message without the effect asked for
+        self.business_connections: dict[str, Any] = {}  # getBusinessConnection's answers
 
     async def _call(self, method: str, kwargs: dict[str, Any]) -> int:
         self.calls.append((method, kwargs))
@@ -86,6 +87,15 @@ class Bot:
     async def unpin_chat_message(self, **kwargs: Any) -> bool:
         await self._call("unpinChatMessage", kwargs)
         return True
+
+    async def get_business_connection(self, business_connection_id: str) -> Any:
+        """``business_connections[id]`` as Telegram's BusinessConnection; an unknown id is Telegram's refusal."""
+        await self._call("getBusinessConnection", {"business_connection_id": business_connection_id})
+        from telegram.error import BadRequest
+
+        if business_connection_id not in self.business_connections:
+            raise BadRequest("Business connection not found")
+        return self.business_connections[business_connection_id]
 
     async def get_sticker_set(self, name: str) -> Any:
         await self._call("getStickerSet", {"name": name})

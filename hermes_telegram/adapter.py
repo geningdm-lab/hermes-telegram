@@ -14,6 +14,8 @@ plugin changes goes into its own mixins, listed before the harvested ones so the
 - ``ActionsMixin`` (slice 4): polls, reactions and stickers, and the answers and reactions that come back.
 - ``WidgetsMixin`` (slice 5): widgets as visual answers, and their requests back to the agent.
 - ``MessagesMixin`` (slice 6): the agent's own messages edited, deleted, pinned and unpinned.
+- ``BusinessInboxMixin`` (docs/business-inbox.md, slice 1): business updates kept in the inbox, never seen by
+  any other handler.
 """
 
 from gateway.platforms.base import BasePlatformAdapter
@@ -41,6 +43,7 @@ from .harvested.telegram_replacement import TelegramReplacementMixin
 from .harvested.telegram_send_path_recovery import TelegramSendPathRecoveryMixin
 from .harvested.telegram_topic_routing import TelegramTopicRoutingMixin
 from .harvested.telegram_vault_code import TelegramVaultCodeMixin
+from .inbox import BusinessInboxMixin
 from .messages import MessagesMixin
 from .turn import HumanTurnsMixin
 from .preview import PreviewMixin
@@ -50,6 +53,7 @@ from .widgets import WidgetsMixin
 
 class HermesTelegramAdapter(
     # This plugin's behaviour.
+    BusinessInboxMixin,
     MessagesMixin,
     ButtonsMixin,
     WidgetsMixin,

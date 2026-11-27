@@ -14,11 +14,16 @@ documents and nothing it does not: they hold no copy of this plugin's own rules.
 - ``sendRichMessageDraft`` (methods/sendrichmessagedraft.md): private chats only, a non-zero ``draft_id``,
   an InputRichMessage; the latest frame per draft is kept in ``drafts``. ``stop_generation`` is the user
   pressing Stop on a draft: the ``stopped_message_generation`` update (types/messagegenerationstopped.md).
+- Telegram Business (core.telegram.org/bots/api, Update, BusinessConnection, BusinessMessagesDeleted,
+  getBusinessConnection): ``business_connect``, ``business_message`` and ``business_delete`` are the owner
+  connecting the bot and messages in the owner's private chats; ``getBusinessConnection`` answers a connection
+  made here and refuses any other.
 """
 
 import hashlib
 import json
 import re
+import time
 import zlib
 from typing import Any
 
@@ -376,6 +381,45 @@ class MediaTelegramStandin(RichTelegramStandin):
         if p.get("message_effect_id"):
             msg["effect_id"] = str(p["message_effect_id"])
         return msg
+
+    # --- Telegram Business ---------------------------------------------------------------------------------
+
+    def business_connect(self, owner_id: int, connection_id: str, *, enabled: bool = True) -> dict[str, Any]:
+        """The owner connects the bot to their account (or ends the connection): a ``business_connection``."""
+        connection = {"id": connection_id, "user": self._user(owner_id, "Owner"), "user_chat_id": int(owner_id),
+                      "date": int(time.time()), "is_enabled": enabled, "rights": {}}
+        self.__dict__.setdefault("_business_connections", {})[connection_id] = connection
+        update = {"update_id": next(self._update_ids), "business_connection": connection}
+        self._push(update)
+        return update
+
+    def business_message(self, connection_id: str, contact_id: int, sender_id: int, text: str | None = None, *,
+                         edit_of: int | None = None, **fields: Any) -> dict[str, Any]:
+        """A message in the owner's private chat with ``contact_id``, written by ``sender_id`` (the owner or the
+        contact); ``edit_of`` makes it the new version of that message; ``fields`` adds a photo, a caption."""
+        message = {"message_id": edit_of or next(self._inbound_ids), "date": int(time.time()),
+                   "business_connection_id": connection_id, **({"text": text} if text is not None else {}),
+                   "chat": {"id": int(contact_id), "type": "private", "first_name": "Contact"},
+                   "from": self._user(sender_id, "Owner" if sender_id != contact_id else "Contact"), **fields}
+        if edit_of:
+            message["edit_date"] = int(time.time())
+        update = {"update_id": next(self._update_ids),
+                  "edited_business_message" if edit_of else "business_message": message}
+        self._push(update)
+        return update
+
+    def business_delete(self, connection_id: str, contact_id: int, message_ids: list[int]) -> dict[str, Any]:
+        update = {"update_id": next(self._update_ids), "deleted_business_messages": {
+            "business_connection_id": connection_id, "message_ids": [int(m) for m in message_ids],
+            "chat": {"id": int(contact_id), "type": "private", "first_name": "Contact"}}}
+        self._push(update)
+        return update
+
+    def _m_getBusinessConnection(self, p: dict[str, Any]) -> dict[str, Any]:
+        connection = self.__dict__.get("_business_connections", {}).get(str(p.get("business_connection_id")))
+        if connection is None:
+            raise BotApiError("Bad Request: business connection not found")
+        return connection
 
     def _m_sendMediaGroup(self, p: dict[str, Any]) -> list[dict[str, Any]]:
         media = p.get("media")
