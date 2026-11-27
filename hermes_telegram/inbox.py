@@ -27,7 +27,8 @@ import re
 import sqlite3
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -43,7 +44,7 @@ ConnectionId = NewType("ConnectionId", str)
 UpdateKey = tuple[str, int]  # (the bot's id, the update's id): update ids count per bot
 
 STORE_NAME = "telegram_business_inbox.sqlite3"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # 2: removed changes kept per seq, so a reader learns of each gap once
 DEFAULT_RETENTION_HOURS = 72
 DEFAULT_MAX_PER_CHAT = 1000
 MAX_RETENTION_HOURS = 87_600  # ten years: a bound on what SQLite and the purge are asked to handle, not a policy
@@ -402,6 +403,9 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, "
     "owner INTEGER NOT NULL, chat INTEGER NOT NULL, message INTEGER NOT NULL, at INTEGER NOT NULL)",
     "CREATE INDEX IF NOT EXISTS changes_by_record ON changes (owner, chat, message)",
+    # Each change removed with its record or trimmed, for the retention period: a reader's page from its cursor
+    # says whether something in that range is gone.
+    "CREATE TABLE IF NOT EXISTS removed (seq INTEGER PRIMARY KEY, owner INTEGER NOT NULL, at INTEGER NOT NULL)",
 )
 _RECORD = "owner = ? AND chat = ? AND message = ?"
 Key = tuple[int, int, int]
@@ -440,13 +444,15 @@ class InboxStore:
         return self.path.exists()
 
     def _open(self, create: bool) -> Optional[sqlite3.Connection]:
+        """The file, checked to be this version's inbox before anything in it changes. ``create`` makes and sets
+        up a missing or empty one (the gateway's writes); without it a file that is not an inbox is refused."""
+        if self.path.is_symlink():
+            raise InboxStoreError("the inbox file is a link; it is not opened")
         if not self.path.exists():
             if not create:
                 return None
-            fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
+            fd = os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
             os.close(fd)
-        if self.path.stat().st_mode & 0o077:
-            os.chmod(self.path, 0o600)
         db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         try:
             db.execute("PRAGMA secure_delete = ON")
@@ -457,12 +463,19 @@ class InboxStore:
                                           f"reads {SCHEMA_VERSION!r}")
             elif db.execute("SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchone():
                 raise InboxStoreError("the inbox file holds tables of something else")
-            else:  # a new file: nothing in it is touched before this point
+            elif not create:
+                raise InboxStoreError("the inbox file is empty or not an inbox")
+            else:  # a new or empty file: nothing in it is touched before this point
                 db.execute("PRAGMA journal_mode = DELETE")
                 with _Write(db):
                     for statement in _SCHEMA:
                         db.execute(statement)
                     db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', ?)", (SCHEMA_VERSION,))
+            if self.path.stat().st_mode & 0o077:
+                os.chmod(self.path, 0o600)
+        except sqlite3.DatabaseError as exc:
+            db.close()
+            raise InboxStoreError(f"the inbox file cannot be read as SQLite ({type(exc).__name__})") from exc
         except BaseException:
             db.close()
             raise
@@ -510,7 +523,7 @@ class InboxStore:
                 if not self._first_time(db, update, now) or not self._enabled(db, seen.connection, owner):
                     return None
                 self._record_limits(db, limits)
-                self._remove(db, self._expired(db, limits, now))
+                self._remove(db, self._expired(db, limits, now), now)
                 if seen.date < now - limits.retention_secs:
                     return None
                 new = db.execute(f"SELECT 1 FROM records WHERE {_RECORD}", key).fetchone() is None
@@ -538,7 +551,7 @@ class InboxStore:
                            "DO UPDATE SET name = excluded.name", (owner, seen.chat, seen.chat_name))
                 self._change(db, change, key, now)
                 self._trim_versions(db, key)
-                self._remove(db, self._over_cap(db, limits, chat=(owner, seen.chat)))
+                self._remove(db, self._over_cap(db, limits, chat=(owner, seen.chat)), now)
                 return change
         finally:
             db.close()
@@ -554,7 +567,7 @@ class InboxStore:
             with _Write(db):
                 if not self._first_time(db, update, now) or not self._enabled(db, deleted.connection, owner):
                     return 0
-                self._remove(db, self._expired(db, limits, now))
+                self._remove(db, self._expired(db, limits, now), now)
                 marked = 0
                 for message in deleted.messages:
                     key: Key = (owner, deleted.chat, message)
@@ -574,13 +587,23 @@ class InboxStore:
             return 0
         try:
             with _Write(db):
-                limits = limits or self._recorded_limits(db)
-                gone = self._expired(db, limits, now) + self._over_cap(db, limits)
-                self._remove(db, gone)
-                db.execute("DELETE FROM updates WHERE at < ?", (now - limits.retention_secs,))
-                return len(set(gone))
+                return self._purge_in(db, limits, now)
         finally:
             db.close()
+
+    def _purge_in(self, db: sqlite3.Connection, limits: Optional[Limits], now: int) -> int:
+        limits = limits or self._recorded_limits(db)
+        gone = self._expired(db, limits, now) + self._over_cap(db, limits)
+        self._remove(db, gone, now)
+        horizon = now - limits.retention_secs
+        db.execute("DELETE FROM updates WHERE at < ?", (horizon,))
+        # A reader behind a removal forgotten here is told of a gap by the mark (InboxView.changes_since).
+        forgotten = db.execute("SELECT MAX(seq) FROM removed WHERE at < ?", (horizon,)).fetchone()[0]
+        if forgotten is not None:
+            db.execute("INSERT INTO meta (key, value) VALUES ('forgotten_through', ?) ON CONFLICT (key) DO UPDATE "
+                       "SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))", (str(forgotten),))
+            db.execute("DELETE FROM removed WHERE at < ?", (horizon,))
+        return len(set(gone))
 
     # --- inside a transaction ----------------------------------------------------------------------------
 
@@ -639,7 +662,7 @@ class InboxStore:
         old = [seq for (seq,) in db.execute(f"SELECT seq FROM changes WHERE {_RECORD} ORDER BY seq DESC "
                                             "LIMIT -1 OFFSET ?", (*key, MAX_VERSIONS + 1))]
         if old:
-            self._removed(db, max(old))
+            self._removed(db, [(seq, key[0]) for seq in old], now)
             db.executemany("DELETE FROM changes WHERE seq = ?", [(seq,) for seq in old])
 
     @staticmethod
@@ -649,75 +672,205 @@ class InboxStore:
                    f"WHERE {_RECORD} ORDER BY edited, rowid LIMIT 1)", (*key, MAX_VERSIONS - 1, *key))
 
     @staticmethod
-    def _removed(db: sqlite3.Connection, seq: int) -> None:
-        """Readers following the change sequence learn that changes up to ``seq`` may be gone."""
+    def _removed(db: sqlite3.Connection, changes: list[tuple[int, int]], now: int) -> None:
+        """Changes ``(seq, owner)`` are gone: kept as removed for readers, and the high mark raised."""
+        db.executemany("INSERT OR IGNORE INTO removed (seq, owner, at) VALUES (?, ?, ?)",
+                       [(seq, owner, now) for seq, owner in changes])
         db.execute("INSERT INTO meta (key, value) VALUES ('removed_through', ?) ON CONFLICT (key) DO UPDATE SET "
-                   "value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))", (str(seq),))
+                   "value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
+                   (str(max(seq for seq, _ in changes)),))
 
-    def _remove(self, db: sqlite3.Connection, keys: list[Key]) -> None:
+    def _remove(self, db: sqlite3.Connection, keys: list[Key], now: int) -> None:
         for key in dict.fromkeys(tuple(k) for k in keys):
-            top = db.execute(f"SELECT MAX(seq) FROM changes WHERE {_RECORD}", key).fetchone()[0]
-            if top is not None:
-                self._removed(db, top)
+            seqs = [seq for (seq,) in db.execute(f"SELECT seq FROM changes WHERE {_RECORD}", key)]
+            if seqs:
+                self._removed(db, [(seq, key[0]) for seq in seqs], now)
             for table in ("changes", "versions", "records"):
                 db.execute(f"DELETE FROM {table} WHERE {_RECORD}", key)
         if keys:
             db.execute("DELETE FROM chats WHERE NOT EXISTS (SELECT 1 FROM records WHERE records.owner = "
                        "chats.owner AND records.chat = chats.chat)")
 
-    # --- reading -----------------------------------------------------------------------------------------
+    # --- reading --------------------------------------------------------------------------------------
 
-    def records(self) -> list[Record]:
-        """Every record, per chat in Telegram's order (date, then message id), from one snapshot."""
+    @contextmanager
+    def session(self, limits: Optional[Limits], now: int) -> Iterator["InboxView"]:
+        """One transaction for a reader: it purges what has expired (by ``limits``, else the file's own), then
+        reads, so what it reads is what the purge left. A missing file reads as empty."""
         db = self._open(create=False)
         if db is None:
-            return []
+            yield InboxView(None, removed=0)
+            return
+        try:
+            with _Write(db):
+                removed = self._purge_in(db, limits, now)
+                yield InboxView(db, removed=removed)
+        finally:
+            db.close()
+
+    @contextmanager
+    def _snapshot(self) -> Iterator["InboxView"]:
+        """A read without a purge (the gateway's own checks and the tests)."""
+        db = self._open(create=False)
+        if db is None:
+            yield InboxView(None, removed=0)
+            return
         try:
             db.execute("BEGIN")
-            rows = db.execute("SELECT owner, chat, message, date, author, name, reply_to, forwarded, offline, media, "
-                              "media_group, deleted FROM records ORDER BY owner, chat, date, message").fetchall()
-            versions: dict[Key, list[Version]] = {}
-            for o, c, m, edited, text in db.execute("SELECT owner, chat, message, edited, text FROM versions "
-                                                    "ORDER BY edited, rowid"):
-                versions.setdefault((o, c, m), []).append(Version(edited, text))
+            yield InboxView(db, removed=0)
             db.execute("COMMIT")
         finally:
             db.close()
-        return [Record(owner=OwnerId(o), chat=ChatId(c), message=MessageId(m), date=d, author=Author(a), name=n,
-                       reply_to=MessageId(r) if r is not None else None, forwarded=bool(f), offline=bool(off),
-                       media=tuple(Attachment(**x) for x in json.loads(media)), media_group=g, deleted=dl,
-                       versions=tuple(versions.get((o, c, m), ())))
-                for o, c, m, d, a, n, r, f, off, media, g, dl in rows]
+
+    def records(self) -> list[Record]:
+        with self._snapshot() as view:
+            return view.records()
+
+    def record(self, owner: OwnerId, chat: ChatId, message: MessageId) -> Optional[Record]:
+        with self._snapshot() as view:
+            return view.record(owner, chat, message)
 
     def changes(self) -> list[tuple[int, Change, OwnerId, ChatId, MessageId]]:
-        db = self._open(create=False)
-        if db is None:
-            return []
-        try:
-            rows = db.execute("SELECT seq, kind, owner, chat, message FROM changes ORDER BY seq").fetchall()
-        finally:
-            db.close()
-        return [(s, Change(k), OwnerId(o), ChatId(c), MessageId(m)) for s, k, o, c, m in rows]
+        with self._snapshot() as view:
+            return view.change_rows()
 
     def removed_through(self) -> int:
-        db = self._open(create=False)
-        if db is None:
-            return 0
-        try:
-            row = db.execute("SELECT value FROM meta WHERE key = 'removed_through'").fetchone()
-        finally:
-            db.close()
-        return int(row[0]) if row else 0
+        with self._snapshot() as view:
+            return view.meta_int("removed_through")
 
     def rights(self, connection: ConnectionId) -> dict[str, bool]:
-        db = self._open(create=False)
-        if db is None:
-            return {}
-        try:
-            row = db.execute("SELECT rights FROM connections WHERE id = ?", (connection,)).fetchone()
-        finally:
-            db.close()
-        return json.loads(row[0]) if row else {}
+        with self._snapshot() as view:
+            return next((r for i, _o, _e, r in view.status().connections if i == connection), {})
+
+
+@dataclass(frozen=True)
+class StoreStatus:
+    connections: tuple[tuple[ConnectionId, OwnerId, bool, dict[str, bool]], ...]
+    records: int
+    chats: int
+    oldest: Optional[int]
+    limits: Optional[Limits]  # the limits the file was last written under
+
+
+@dataclass(frozen=True)
+class ChangesPage:
+    items: list[tuple[int, Change, int, Record]]  # (seq, kind, at, the record as it is now)
+    more: bool
+    next_cursor: int
+    gap: bool
+
+
+_COLUMNS = ("SELECT owner, chat, message, date, author, name, reply_to, forwarded, offline, media, media_group, "
+            "deleted FROM records")
+
+
+class InboxView:
+    """Reads inside one transaction. ``owner`` scopes a read to that owner's chats; None reads the whole file
+    (intake off: the profile's own base, whoever it was written for)."""
+
+    def __init__(self, db: Optional[sqlite3.Connection], removed: int) -> None:
+        self.db, self.removed = db, removed
+
+    def _build(self, rows: list[tuple]) -> list[Record]:
+        assert self.db is not None
+        records = []
+        for o, c, m, d, a, n, r, f, off, media, g, dl in rows:
+            versions = tuple(Version(e, x) for e, x in self.db.execute(
+                f"SELECT edited, text FROM versions WHERE {_RECORD} ORDER BY edited, rowid", (o, c, m)))
+            records.append(Record(owner=OwnerId(o), chat=ChatId(c), message=MessageId(m), date=d, author=Author(a),
+                                  name=n, reply_to=MessageId(r) if r is not None else None, forwarded=bool(f),
+                                  offline=bool(off), media=tuple(Attachment(**x) for x in json.loads(media)),
+                                  media_group=g, deleted=dl, versions=versions))
+        return records
+
+    @staticmethod
+    def _scope(owner: Optional[OwnerId], column: str = "owner") -> tuple[str, tuple]:
+        return (f" AND {column} = ?", (owner,)) if owner is not None else ("", ())
+
+    def meta_int(self, key: str) -> int:
+        if self.db is None:
+            return 0
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return int(row[0]) if row else 0
+
+    def records(self) -> list[Record]:
+        if self.db is None:
+            return []
+        return self._build(self.db.execute(f"{_COLUMNS} ORDER BY owner, chat, date, message").fetchall())
+
+    def record(self, owner: OwnerId, chat: ChatId, message: MessageId) -> Optional[Record]:
+        if self.db is None:
+            return None
+        found = self._build(self.db.execute(f"{_COLUMNS} WHERE {_RECORD}", (owner, chat, message)).fetchall())
+        return found[0] if found else None
+
+    def window(self, owner: OwnerId, chat: ChatId, before: Optional[tuple[int, int]],
+               limit: int) -> tuple[list[Record], bool]:
+        """The newest ``limit`` records of one chat before ``(date, message)``, oldest first, and whether older
+        ones remain."""
+        if self.db is None:
+            return [], False
+        where, args = "owner = ? AND chat = ?", [owner, chat]
+        if before is not None:
+            where += " AND (date, message) < (?, ?)"
+            args += list(before)
+        rows = self.db.execute(f"{_COLUMNS} WHERE {where} ORDER BY date DESC, message DESC LIMIT ?",
+                               (*args, limit + 1)).fetchall()
+        return self._build(list(reversed(rows[:limit]))), len(rows) > limit
+
+    def changes_since(self, since: int, limit: int, owner: Optional[OwnerId]) -> ChangesPage:
+        """Changes after ``since`` in order. A page covers the changes from the cursor to its last one, or to the
+        end of the log when nothing more follows; ``gap`` says whether a change in that range is gone, so a reader
+        that passes ``next_cursor`` back is told of each removal once."""
+        if self.db is None:
+            return ChangesPage([], False, since, False)
+        top = self.db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'changes'").fetchone()
+        top = top[0] if top else 0
+        reset = since > top  # a cursor past the end: the file was made anew; read it from the start
+        start = 0 if reset else since
+        scope, args = self._scope(owner)
+        rows = self.db.execute(f"SELECT seq, kind, at, owner, chat, message FROM changes WHERE seq > ?{scope} "
+                               "ORDER BY seq LIMIT ?", (start, *args, limit + 1)).fetchall()
+        more = len(rows) > limit
+        items = []
+        for seq, kind, at, o, c, m in rows[:limit]:
+            [record] = self._build(self.db.execute(f"{_COLUMNS} WHERE {_RECORD}", (o, c, m)).fetchall())
+            items.append((seq, Change(kind), at, record))
+        end = items[-1][0] if more else top
+        gone = self.db.execute(f"SELECT 1 FROM removed WHERE seq > ? AND seq <= ?{scope} LIMIT 1",
+                               (start, end, *args)).fetchone() is not None
+        gap = reset or gone or start < self.meta_int("forgotten_through")
+        return ChangesPage(items, more, end, gap)
+
+    def change_rows(self) -> list[tuple[int, Change, OwnerId, ChatId, MessageId]]:
+        if self.db is None:
+            return []
+        rows = self.db.execute("SELECT seq, kind, owner, chat, message FROM changes ORDER BY seq").fetchall()
+        return [(s, Change(k), OwnerId(o), ChatId(c), MessageId(m)) for s, k, o, c, m in rows]
+
+    def chats(self, owner: Optional[OwnerId]) -> list[tuple[OwnerId, ChatId, str, int, int]]:
+        """Each chat: owner, chat, the other person's name, the last record's date and the record count."""
+        if self.db is None:
+            return []
+        scope, args = self._scope(owner, "c.owner")
+        rows = self.db.execute("SELECT c.owner, c.chat, c.name, MAX(r.date), COUNT(r.message) FROM chats c JOIN "
+                               "records r ON r.owner = c.owner AND r.chat = c.chat WHERE 1 = 1" + scope +
+                               " GROUP BY c.owner, c.chat ORDER BY MAX(r.date) DESC, c.chat", args).fetchall()
+        return [(OwnerId(o), ChatId(c), n, d, k) for o, c, n, d, k in rows]
+
+    def status(self, owner: Optional[OwnerId] = None) -> StoreStatus:
+        if self.db is None:
+            return StoreStatus(connections=(), records=0, chats=0, oldest=None, limits=None)
+        scope, args = self._scope(owner)
+        connections = tuple((ConnectionId(i), OwnerId(o), bool(e), json.loads(r)) for i, o, e, r in self.db.execute(
+            f"SELECT id, owner, enabled, rights FROM connections WHERE 1 = 1{scope} ORDER BY updated, id", args))
+        records, oldest = self.db.execute(f"SELECT COUNT(*), MIN(date) FROM records WHERE 1 = 1{scope}",
+                                          args).fetchone()
+        chats = self.db.execute(f"SELECT COUNT(*) FROM (SELECT DISTINCT owner, chat FROM records WHERE 1 = 1{scope})",
+                                args).fetchone()[0]
+        recorded = self.db.execute("SELECT COUNT(*) FROM meta WHERE key IN ('retention_hours', 'max_per_chat')")
+        limits = InboxStore._recorded_limits(self.db) if recorded.fetchone()[0] == 2 else None
+        return StoreStatus(connections=connections, records=records, chats=chats, oldest=oldest, limits=limits)
 
 
 # --- the adapter ------------------------------------------------------------------------------------------

@@ -188,7 +188,7 @@ def test_a_file_of_another_schema_is_refused_unchanged(tmp_path):
     # Review, slice 1. Bug: the current schema's tables and journal mode written into a file before refusing it.
     path = tmp_path / STORE_NAME
     db = sqlite3.connect(path)
-    db.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('schema', '2');")
+    db.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('schema', '9');")
     db.close()
     before = hashlib.sha256(path.read_bytes()).hexdigest()
 

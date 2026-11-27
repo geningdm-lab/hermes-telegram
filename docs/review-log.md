@@ -388,3 +388,20 @@ End to end:
 ### Accepted in part
 
 **[P1] Enforce the single-owner, default-profile configuration.** Accepted: exactly one owner (decision 5), `test_unusable_settings_are_refused`. Disputed: requiring the literal profile name `default`. The design's rule is that the inbox lives in the home of the profile whose adapter receives the updates, never another profile's ("In this version that must be the adapter's own profile, `default`"). In the deployment the bot belongs to `default` (homelab's runbook for the second profile), so the check against the adapter's own profile is the same check there, and the literal name would only refuse that setup on a host where the bot's profile has another name. Reopens if the owner wants the inbox tied to the name `default` whatever profile owns the bot.
+
+## Business inbox, slice 2, PR #17
+
+Review: Codex `gpt-6.2-astra`, effort `high`, scope `branch:origin/main` at `8023f86`, 2026-11-28 (docs/business-inbox.md, Read contract). Ten findings, all accepted and fixed. The tests named are in `checks/test_business_inbox_cli.py`; each was checked against a mutation of its fix unless the row says otherwise.
+
+| Finding | Fix |
+|---|---|
+| [P1] Scope inbox reads to the configured owner | with intake on, status, chats and changes read the configured owner's chats only, and a ref of another owner's chat is `unknown_ref`; with intake off the profile's whole base; `test_with_intake_on_only_the_configured_owners_chats_are_read` |
+| [P1] Acknowledge a purge gap without skipping surviving changes | removed changes are kept per seq with their owner (schema 2); a page covers the cursor to its last change, or to the end of the log when nothing more follows, and reports a gap for that range only, so each removal is reported once; `test_a_gap_behind_changes_that_survive_is_reported_once` |
+| [P1] Refuse inbox paths that resolve into another profile | a link at the inbox's path is refused before anything is read or purged, and the file is created with `O_NOFOLLOW`; `test_an_unusable_file_or_a_disabled_platform_answers_in_json` |
+| [P2] Purge and answer from the same transaction | `InboxStore.session` purges and reads in one write transaction, the `--before` anchor included. No test: an interleaving writer cannot be placed between the two from outside the store |
+| [P2] Use recorded limits when Telegram intake is disabled | Telegram not enabled in the profile reads as intake off, with the file's recorded limits; same test as the link row |
+| [P2] Return contract JSON for parser-level argument errors | the inbox's arguments are taken whole and parsed by the plugin, without abbreviations, before the file is touched: an unknown command, option or missing `--chat` is the contract's JSON with exit 2, through the real executable too; `test_arguments_outside_the_contract_are_refused_with_a_code`, `test_hermes_telegram_inbox_runs_from_the_plugin_and_reads_the_profiles_settings` |
+| [P2] Translate unusable-store failures to JSON | a file that is not SQLite is the store's error; any SQLite, file or decoding failure at the CLI is `store` with exit 1, named by kind only; the link row's test |
+| [P2] Open existing stores without initializing or modifying foreign files | without `create`, a file that is not this version's inbox is refused, an empty one included; permissions are set only on a file found or made to be the inbox; same test |
+| [P3] Define the first version consistently for edit-only records | the contract documents it: a record first seen through an edit starts with that edit's time; `test_a_record_reads_with_its_versions_its_deletion_its_reply_and_a_link` |
+| [P3] Exercise profile selection with two distinct test inboxes | `hermes -p work` against a default and a `work` home with different records; `test_hermes_p_reads_the_selected_profiles_base_only`. Not mutation-checked: profile selection is Hermes' own |

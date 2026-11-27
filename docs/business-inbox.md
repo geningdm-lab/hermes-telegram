@@ -1,6 +1,6 @@
 # Design: Business inbox
 
-Status: design approved (PR #15, 2026-11-27); slice 1 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
+Status: design approved (PR #15, 2026-11-27); slice 1 built (PR #16), slice 2 built. Date: 2026-11-27. A feature of its own, next to the presentation design in [design.md](design.md), and not a Prism attempt.
 
 ## Why
 
@@ -102,22 +102,26 @@ One writer of records: the adapter in the gateway process. The CLI only reads, e
 - One SQLite file, `telegram_business_inbox.sqlite3`, in the Hermes home of the profile the owner maps to, mode 0600. In this version that must be the adapter's own profile, `default`; a mapping to any other profile, like any unusable setting, is refused when the adapter connects: the inbox stays off and the gateway log says why.
 - `retention_hours` (default 72) counts from the message's Telegram date, not from when it arrived. `max_messages_per_chat` (default 1000) counts records, not versions; the 1001st record of a chat purges that chat's oldest by Telegram date, then message id. A message older than every record a full chat keeps is not kept at all. Either limit is a whole number, at most ten years of hours and a million records.
 - A purge runs with every message kept, before every CLI command answers, and every 10 minutes while the adapter's Application runs; that task ends with it. A file that exists keeps expiring when intake is off or its settings are refused: the purge then applies the limits the file was last written under. `hermes telegram inbox purge` lets the host run it on a timer when the gateway is down.
-- Purged rows must not linger in the file: `secure_delete` is on and the journal is not left in WAL. A file of another schema, or of something else, is refused before anything is written to it. Backups of the host volume are outside this plugin; a backup taken while records exist keeps them past 72 hours.
+- Purged rows must not linger in the file: `secure_delete` is on and the journal is not left in WAL. A file of another schema, or of something else, is refused before anything is written to it or its permissions change. The schema is version 2: each removed change is kept, with its owner, for the retention period, so `changes` can say which range lost one; a reader behind a removal older than that is told of a gap by a mark. Backups of the host volume are outside this plugin; a backup taken while records exist keeps them past 72 hours.
 - Settings live in the platform's `extra` as `business_inbox: {owners: {<user id>: <profile>}, retention_hours, max_messages_per_chat}`, with exactly one owner in this version (decision 5); `HERMES_TELEGRAM_INBOX_RETENTION_HOURS` and `HERMES_TELEGRAM_INBOX_MAX_PER_CHAT` override the two limits. Owner ids come from homelab's configuration; this public repository holds none.
 
 ## Read contract
 
-`hermes telegram inbox <command> [options]` prints one JSON object with `contract_version: 1`. It reads the base of the profile it runs in (`HERMES_HOME`, `-p`); no command takes a profile or an owner. The schema of the file is private to the plugin.
+`hermes telegram inbox <command> [options]` prints one JSON object with `contract_version: 1`. It reads the base of the profile it runs in (`HERMES_HOME`, `-p`); no command takes a profile or an owner. With intake on it reads the configured owner's chats only, so records of an owner the settings no longer name are not shown while they expire; with intake off (no settings, refused ones, or Telegram not enabled in the profile, which the gateway then does not serve) it reads the profile's whole base. The schema of the file is private to the plugin. Each command checks its arguments first, then runs in one transaction that purges and reads, so it prints what the purge left.
 
 | Command | Prints |
 |---|---|
-| `status` | Connections (owner, enabled, rights), record and chat counts, the oldest record's age, the limits in effect. No content |
-| `chats` | Each chat with a reference, the other person's display name, the last message's date and the record count |
-| `changes --since <cursor> [--limit N]` | Inserts, edits and deletions after the cursor, in order, and `next_cursor`. `gap: true` when a purge removed changes the caller has not read |
-| `window --chat <ref> [--before <ref>] [--limit N]` | Records of one chat, oldest first |
-| `purge` | What it removed, as counts |
+| `status` | `intake` (`on` or `off`, with `intake_error` when settings were refused), `limits` with their `source` (`config`, `recorded` in the file, or `default`), `connections` (connection, owner, enabled, rights), `records`, `chats`, `oldest_record_age_secs`. No content |
+| `chats` | `chats`: each with `chat` (its ref), `name` (the other person's), `last_date` and `records`, the most recent first |
+| `changes [--since <cursor>] [--limit N]` | `changes`: inserts, edits and deletions after the cursor, in order, each with its `cursor`, `kind`, `at` and the `record` as it is now; `next_cursor`; `more` when the limit cut the list; `gap: true` when a change in the range the page covers is gone. A page covers the changes from the cursor to its last one, or to the end of the log when `more` is false, so a reader that passes `next_cursor` back is told of each removal once, on the page that passes it |
+| `window --chat <ref> [--before <ref>] [--limit N]` | `records` of one chat, the newest `N` before the given record, oldest first; `more` when older ones remain |
+| `purge` | `removed`: how many records it removed |
 
-A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, `date` (UTC, ISO 8601), `text`, `reply_to`, `forwarded`, `offline`, `media`, `versions`, `deleted` and `link`.
+`--limit` defaults to 100 and takes at most 1000. A cursor is a string of digits, from `next_cursor`; without `--since` the changes start from the first one kept.
+
+A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, `date` (UTC, ISO 8601), `text` (the newest version's), `reply_to` (a ref, or null), `forwarded`, `offline`, `media`, `versions` (each with `edited`, null for the message as first sent, and `text`; a record first seen through an edit, its original sent while the bot was not connected, starts with that edit's time), `deleted` (when the inbox learned of it, or null) and `link`.
+
+An argument outside the contract prints `{"contract_version": 1, "error": {"code", "message"}}` and exits 2, before the file is touched: `bad_command`, `bad_arguments` (an unknown option; options are not abbreviated), `bad_cursor`, `bad_limit`, `bad_ref`, or `unknown_ref` (a `--before` record the inbox does not hold, perhaps expired, or a chat of an owner the settings do not name). A file this version cannot use prints the same with `store` and exits 1: one of another schema, one that is not SQLite, an empty one, or a link (the inbox file is never followed into another profile). Its message names the kind of failure, never stored content. Refs are built by the plugin and parsed only by it; a reader passes them back as given.
 
 `link` is `{kind, url}`. `kind` is `exact` for a link to the message itself, `chat` for one to the other person (the Bot API's mention link, `tg://user?id=<id>`), or `none`. No exact form is documented for private chats, so this version gives `chat`. A candidate for `exact` is `tg://resolve?domain=<username>&post=<message_id>`: Telegram Desktop's `resolve` handler parses `post` whatever kind of peer the username names (`Telegram/SourceFiles/core/local_url_handlers.cpp`, tdesktop `master` read 2026-11-27). Whether it then opens a message in a private chat, on Desktop or on iOS, is unknown, and it needs the other person to have a username. The base keeps the ids a link is built from, so a form that passes a live test changes only how the link is built.
 
@@ -126,7 +130,7 @@ A record in the output has `ref` and `chat` (opaque strings), `author`, `name`, 
 Each slice is one pull request to `main`, reviewed by the owner.
 
 1. Intake and storage: B1, B3 to B7, B9, B10. The Bot API stand-in learns to deliver the four business updates and to answer `getBusinessConnection`. Proved on the pin: the group -20 handler sees business updates through the harvested `TelegramApplication`, and no later group, and no agent, sees them (`checks/test_business_inbox.py`, `checks/e2e/test_business_inbox.py`). Built in `hermes_telegram/inbox.py`.
-2. Read contract: B8. It first proves that `hermes telegram` registers from this plugin on the pin.
+2. Read contract: B8. Proved on the pin: `hermes telegram` registers from this plugin, which `register` adds with `ctx.register_cli_command`, and reads the profile's own `extra` through `load_gateway_config` (`checks/test_business_inbox_cli.py` runs the real `hermes` executable on a throwaway home). Built in `hermes_telegram/inbox_cli.py`.
 3. Live acceptance of B1 to B3 on `vtadevbot`, and the link test.
 
 ## Decisions and open questions

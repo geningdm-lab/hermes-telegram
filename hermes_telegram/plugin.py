@@ -121,8 +121,13 @@ def registration_kwargs() -> dict[str, Any]:
 
 
 def register(ctx: Any) -> None:
-    """Plugin entry point, called by the Hermes plugin system: the platform, then the agent's tools."""
+    """Plugin entry point, called by the Hermes plugin system: the platform, the agent's tools, and
+    ``hermes telegram`` (the Business inbox's read contract, docs/business-inbox.md). Hermes imports a deferred
+    platform for a CLI command only when the command is named as the platform (``hermes_cli/main.py:2577``)."""
+    from . import inbox_cli
     from .tools import register_tools
 
     ctx.register_platform(**registration_kwargs())
     register_tools(ctx)
+    ctx.register_cli_command("telegram", "Telegram adapter commands: the Business inbox", inbox_cli.setup,
+                             inbox_cli.run, description="hermes telegram inbox {status,chats,changes,window,purge}")
