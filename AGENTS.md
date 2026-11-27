@@ -1,6 +1,6 @@
 # Working in hermes-telegram
 
-Read README.md and docs/design.md before changing anything. The design's acceptance rows and the owner's answers in the linked PRD are the requirements; do not narrow or widen them silently. A change that departs from the design updates the design in the same pull request.
+Read README.md and the design of the feature you change before changing anything: docs/design.md for the presentation surface, docs/business-inbox.md for the Business inbox. A design's acceptance rows and the owner's decisions it records (for docs/design.md, also the answers in the linked PRD) are the requirements; do not narrow or widen them silently. A change that departs from a design updates that design in the same pull request.
 
 ## Rules
 
@@ -15,7 +15,7 @@ Read README.md and docs/design.md before changing anything. The design's accepta
 
 ## Per slice
 
-- One slice of docs/design.md per pull request, in order.
+- One slice of a feature's design per pull request, in order.
 - When a slice is ready, run an independent review: Codex with `gpt-6.2-astra` at effort `high` through `llm-bridge` against the slice's branch. Fix the findings you accept. Record each finding you dispute in docs/review-log.md with the evidence and what would reopen it.
 - Product questions (what the owner sees or decides, not how the code does it) go to the owner as a push notification, not into code as a guess.
 - Tests run in `checks/` (`.venv/bin/pytest`; `-m "not e2e"` skips the gateway runs). The session's Hermes home is a throwaway one (checks/conftest.py); never point a test at a real profile.
