@@ -1,31 +1,35 @@
 """``hermes telegram inbox``: the Business inbox's read contract (docs/business-inbox.md, Read contract; slice 2).
 
 Each command prints one JSON object with ``contract_version: 1`` and reads the base of the profile it runs in
-(``HERMES_HOME``, ``hermes -p``); none takes a profile or an owner. The file's schema stays private to the plugin:
-readers depend on this output only. Every command first purges what has expired, by the settings in effect, or by
-the limits the file was last written under when intake is off.
+(``HERMES_HOME``, ``hermes -p``); none takes a profile or an owner. With intake on it reads the configured owner's
+chats only. The file's schema stays private to the plugin: readers depend on this output only. Every command runs
+in one transaction that first purges what has expired, by the settings in effect, or by the limits the file was
+last written under when intake is off, so what it prints is what the purge left.
 
-Refs are opaque strings; a reader passes them back as given and never builds them. A bad argument prints an
-``error`` object and exits 2; a file this version cannot use exits 1.
+Refs are opaque strings; a reader passes them back as given and never builds them. Any argument outside the
+contract prints an ``error`` object on stdout and exits 2, before the file is touched; a file this version cannot
+use exits 1.
 """
 
 import argparse
 import json
 import re
+import sqlite3
 import sys
 import time
 from datetime import UTC, datetime
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 from . import inbox
 from .inbox import (
-    STORE_NAME, ChatId, InboxConfigError, InboxSettings, InboxStore, InboxStoreError, Limits, MessageId, OwnerId,
-    Record, inbox_settings,
+    STORE_NAME, ChatId, InboxConfigError, InboxSettings, InboxStore, InboxStoreError, InboxView, Limits, MessageId,
+    OwnerId, Record, inbox_settings,
 )
 
 CONTRACT_VERSION = 1
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
+COMMANDS = ("status", "chats", "changes", "window", "purge")
 _CHAT_REF = re.compile(r"([0-9]{1,16})\.(-?[0-9]{1,16})")
 _RECORD_REF = re.compile(r"([0-9]{1,16})\.(-?[0-9]{1,16})\.([0-9]{1,16})")
 _CURSOR = re.compile(r"[0-9]{1,18}")
@@ -75,84 +79,80 @@ def record_json(record: Record) -> dict[str, Any]:
         "forwarded": record.forwarded,
         "offline": record.offline,
         "media": [{k: v for k, v in vars(a).items() if v is not None} for a in record.media],
+        # ``edited`` is null for the message as first sent; a record first seen through an edit (its original
+        # came while the bot was not connected) starts with that edit's time.
         "versions": [{"edited": iso(v.edited) if v.edited else None, "text": v.text} for v in record.versions],
         "deleted": iso(record.deleted),
         "link": link(record.chat),
     }
 
 
-# --- the commands -----------------------------------------------------------------------------------------
+# --- arguments: parsed here, so every refusal is the contract's ------------------------------------------
 
 
-def _limit(value: Optional[str], default: int) -> int:
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise ContractError("bad_arguments", message)
+
+
+def _command_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="hermes telegram inbox", allow_abbrev=False, add_help=False)
+    ops = parser.add_subparsers(dest="command", parser_class=_Parser)
+    for name in ("status", "chats", "purge"):
+        ops.add_parser(name, allow_abbrev=False, add_help=False)
+    changes_parser = ops.add_parser("changes", allow_abbrev=False, add_help=False)
+    changes_parser.add_argument("--since")
+    changes_parser.add_argument("--limit")
+    window_parser = ops.add_parser("window", allow_abbrev=False, add_help=False)
+    window_parser.add_argument("--chat")
+    window_parser.add_argument("--before")
+    window_parser.add_argument("--limit")
+    return parser
+
+
+def parse(argv: list[str]) -> argparse.Namespace:
+    if not argv or argv[0] not in COMMANDS:
+        raise ContractError("bad_command", "use one of: " + ", ".join(COMMANDS))
+    args = _command_parser().parse_args(argv)
+    args.limit = _limit(getattr(args, "limit", None))
+    if args.command == "changes":
+        since = args.since
+        if since is not None and not _CURSOR.fullmatch(since):
+            raise ContractError("bad_cursor", "--since takes a cursor as `changes` printed it in next_cursor")
+        args.since = int(since or 0)
+    if args.command == "window":
+        if args.chat is None:
+            raise ContractError("bad_ref", "window needs --chat, a chat ref as `chats` prints it")
+        args.chat = _parse_chat(args.chat)
+        args.before = _parse_record(args.before) if args.before is not None else None
+        if args.before is not None and args.before[:2] != args.chat:
+            raise ContractError("bad_ref", "--before names a record of another chat")
+    return args
+
+
+def _limit(value: Optional[str]) -> int:
     if value is None:
-        return default
+        return DEFAULT_LIMIT
     if not re.fullmatch(r"[0-9]{1,6}", value) or not 1 <= int(value) <= MAX_LIMIT:
         raise ContractError("bad_limit", f"--limit must be a whole number from 1 to {MAX_LIMIT}")
     return int(value)
 
 
 def _parse_chat(ref: str) -> tuple[OwnerId, ChatId]:
-    match = _CHAT_REF.fullmatch(ref or "")
+    match = _CHAT_REF.fullmatch(ref)
     if match is None:
         raise ContractError("bad_ref", "--chat takes a chat ref as `chats` prints it")
     return OwnerId(int(match[1])), ChatId(int(match[2]))
 
 
 def _parse_record(ref: str) -> tuple[OwnerId, ChatId, MessageId]:
-    match = _RECORD_REF.fullmatch(ref or "")
+    match = _RECORD_REF.fullmatch(ref)
     if match is None:
         raise ContractError("bad_ref", "--before takes a record ref as `window` or `changes` prints it")
     return OwnerId(int(match[1])), ChatId(int(match[2])), MessageId(int(match[3]))
 
 
-def status(store: InboxStore, settings: Optional[InboxSettings], intake_error: Optional[str],
-           now: int) -> dict[str, Any]:
-    state = store.status()
-    limits, source = _limits_in_effect(settings, state.limits)
-    return {
-        "intake": "on" if settings is not None else "off",
-        **({"intake_error": intake_error} if intake_error else {}),
-        "limits": {"retention_hours": limits.retention_hours, "max_messages_per_chat": limits.max_per_chat,
-                   "source": source},
-        "connections": [{"connection": cid, "owner": owner, "enabled": enabled, "rights": rights}
-                        for cid, owner, enabled, rights in state.connections],
-        "records": state.records,
-        "chats": state.chats,
-        "oldest_record_age_secs": now - state.oldest if state.oldest is not None else None,
-    }
-
-
-def chats(store: InboxStore) -> dict[str, Any]:
-    return {"chats": [{"chat": chat_ref(owner, chat), "name": name, "last_date": iso(last), "records": count}
-                      for owner, chat, name, last, count in store.chats()]}
-
-
-def changes(store: InboxStore, since: Optional[str], limit: Optional[str]) -> dict[str, Any]:
-    if since is not None and not _CURSOR.fullmatch(since):
-        raise ContractError("bad_cursor", "--since takes a cursor as `changes` printed it in next_cursor")
-    cursor = int(since or 0)
-    items, more, removed_through = store.changes_since(cursor, _limit(limit, DEFAULT_LIMIT))
-    # Past the cursor, changes up to removed_through may be gone: the reader has missed them.
-    last = items[-1][0] if items else max(cursor, removed_through)
-    return {"changes": [{"cursor": str(seq), "kind": kind.value, "at": iso(at), "record": record_json(record)}
-                        for seq, kind, at, record in items],
-            "next_cursor": str(last), "more": more, "gap": cursor < removed_through}
-
-
-def window(store: InboxStore, chat: str, before: Optional[str], limit: Optional[str]) -> dict[str, Any]:
-    owner, chat_id = _parse_chat(chat)
-    position = None
-    if before is not None:
-        b_owner, b_chat, b_message = _parse_record(before)
-        if (b_owner, b_chat) != (owner, chat_id):
-            raise ContractError("bad_ref", "--before names a record of another chat")
-        anchor = store.record(b_owner, b_chat, b_message)
-        if anchor is None:
-            raise ContractError("unknown_ref", "--before names a record the inbox does not hold (it may have expired)")
-        position = (anchor.date, anchor.message)
-    records, more = store.window(owner, chat_id, position, _limit(limit, DEFAULT_LIMIT))
-    return {"chat": chat_ref(owner, chat_id), "records": [record_json(r) for r in records], "more": more}
+# --- the commands, inside one session ---------------------------------------------------------------------
 
 
 def _limits_in_effect(settings: Optional[InboxSettings], recorded: Optional[Limits]) -> tuple[Limits, str]:
@@ -163,25 +163,73 @@ def _limits_in_effect(settings: Optional[InboxSettings], recorded: Optional[Limi
     return inbox.DEFAULT_LIMITS, "default"
 
 
+def _own(owner: Optional[OwnerId], chat_owner: OwnerId) -> None:
+    """With intake on, a ref of another owner's chat names nothing this profile may read."""
+    if owner is not None and chat_owner != owner:
+        raise ContractError("unknown_ref", "the ref names a chat of an owner this profile does not keep")
+
+
+def respond(args: argparse.Namespace, view: InboxView, settings: Optional[InboxSettings],
+            intake_error: Optional[str], now: int) -> dict[str, Any]:
+    owner = settings.owner if settings is not None else None
+    if args.command == "status":
+        state = view.status(owner)
+        limits, source = _limits_in_effect(settings, state.limits)
+        body: dict[str, Any] = {
+            "intake": "on" if settings is not None else "off",
+            **({"intake_error": intake_error} if intake_error else {}),
+            "limits": {"retention_hours": limits.retention_hours, "max_messages_per_chat": limits.max_per_chat,
+                       "source": source},
+            "connections": [{"connection": cid, "owner": o, "enabled": enabled, "rights": rights}
+                            for cid, o, enabled, rights in state.connections],
+            "records": state.records, "chats": state.chats,
+            "oldest_record_age_secs": now - state.oldest if state.oldest is not None else None,
+        }
+    elif args.command == "chats":
+        body = {"chats": [{"chat": chat_ref(o, c), "name": name, "last_date": iso(last), "records": count}
+                          for o, c, name, last, count in view.chats(owner)]}
+    elif args.command == "changes":
+        page = view.changes_since(args.since, args.limit, owner)
+        body = {"changes": [{"cursor": str(seq), "kind": kind.value, "at": iso(at), "record": record_json(record)}
+                            for seq, kind, at, record in page.items],
+                "next_cursor": str(page.next_cursor), "more": page.more, "gap": page.gap}
+    elif args.command == "window":
+        chat_owner, chat = args.chat
+        _own(owner, chat_owner)
+        position = None
+        if args.before is not None:
+            anchor = view.record(*args.before)
+            if anchor is None:
+                raise ContractError("unknown_ref", "--before names a record the inbox does not hold (it may have "
+                                                   "expired)")
+            position = (anchor.date, anchor.message)
+        records, more = view.window(chat_owner, chat, position, args.limit)
+        body = {"chat": chat_ref(chat_owner, chat), "records": [record_json(r) for r in records], "more": more}
+    else:  # purge: the session's purge is the answer
+        body = {"removed": view.removed}
+    return {"contract_version": CONTRACT_VERSION, **body}
+
+
+def answer(argv: list[str], store: InboxStore, settings: Optional[InboxSettings], intake_error: Optional[str],
+           now: int) -> dict[str, Any]:
+    """One command's JSON object: the arguments checked first, then one session that purges and reads."""
+    args = parse(argv)
+    with store.session(settings.limits if settings is not None else None, now) as view:
+        return respond(args, view, settings, intake_error, now)
+
+
 # --- the CLI ----------------------------------------------------------------------------------------------
 
 
 def setup(parser: argparse.ArgumentParser) -> None:
-    """``hermes telegram``: this plugin's commands; ``inbox`` is the Business inbox's read contract."""
+    """``hermes telegram``: this plugin's commands; ``inbox`` is the Business inbox's read contract. Its own
+    arguments are parsed by ``parse``, so an argument outside the contract is refused as JSON."""
     commands = parser.add_subparsers(dest="telegram_command", metavar="{inbox}")
     inbox_parser = commands.add_parser("inbox", help="Read the Business inbox (JSON, contract_version 1)",
-                                       description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ops = inbox_parser.add_subparsers(dest="inbox_command", metavar="{status,chats,changes,window,purge}")
-    ops.add_parser("status", help="Connections, counts and the limits in effect; no content")
-    ops.add_parser("chats", help="Each chat with its ref, name, last message date and record count")
-    changes_parser = ops.add_parser("changes", help="Inserts, edits and deletions after a cursor, in order")
-    changes_parser.add_argument("--since", help="the next_cursor of the previous call; omitted: from the start")
-    changes_parser.add_argument("--limit", help=f"at most this many (default {DEFAULT_LIMIT}, at most {MAX_LIMIT})")
-    window_parser = ops.add_parser("window", help="Records of one chat, oldest first")
-    window_parser.add_argument("--chat", required=True, help="a chat ref as `chats` prints it")
-    window_parser.add_argument("--before", help="only records before this record ref")
-    window_parser.add_argument("--limit", help=f"the newest this many (default {DEFAULT_LIMIT}, at most {MAX_LIMIT})")
-    ops.add_parser("purge", help="Remove what has expired now; prints the count")
+                                       description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                       epilog="commands: status | chats | changes [--since CURSOR] [--limit N] | "
+                                              "window --chat REF [--before REF] [--limit N] | purge")
+    inbox_parser.add_argument("argv", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
 
 def _settings() -> tuple[Optional[InboxSettings], Optional[str]]:
@@ -193,31 +241,14 @@ def _settings() -> tuple[Optional[InboxSettings], Optional[str]]:
 
     try:
         platform = load_gateway_config().platforms.get(Platform.TELEGRAM)
-        return inbox_settings((platform.extra if platform else None) or {}, os.environ,
-                              get_active_profile_name()), None
+        if platform is None or not platform.enabled:
+            # The gateway serves no disabled platform (gateway/config.py, get_connected_platforms).
+            return None, "Telegram is not enabled in this profile"
+        return inbox_settings(platform.extra or {}, os.environ, get_active_profile_name()), None
     except InboxConfigError as exc:
         return None, str(exc)
     except Exception as exc:  # an unreadable config: read as intake off, so the purge uses the file's own limits
         return None, f"the profile's configuration could not be read ({type(exc).__name__})"
-
-
-def answer(command: str, args: argparse.Namespace, store: InboxStore, settings: Optional[InboxSettings],
-           intake_error: Optional[str], now: int) -> dict[str, Any]:
-    """One command's JSON object, after the purge every command runs first."""
-    removed = store.purge(settings.limits if settings is not None else None, now)
-    if command == "status":
-        body = status(store, settings, intake_error, now)
-    elif command == "chats":
-        body = chats(store)
-    elif command == "changes":
-        body = changes(store, args.since, args.limit)
-    elif command == "window":
-        body = window(store, args.chat, args.before, args.limit)
-    elif command == "purge":
-        body = {"removed": removed}
-    else:
-        raise ContractError("bad_command", "use one of: status, chats, changes, window, purge")
-    return {"contract_version": CONTRACT_VERSION, **body}
 
 
 def run(args: argparse.Namespace) -> int:
@@ -227,14 +258,19 @@ def run(args: argparse.Namespace) -> int:
     if getattr(args, "telegram_command", None) != "inbox":
         print("usage: hermes telegram inbox {status,chats,changes,window,purge}", file=sys.stderr)
         return 2
-    command = getattr(args, "inbox_command", None) or ""
     store = InboxStore(get_hermes_home() / STORE_NAME)
     try:
         settings, intake_error = _settings()
-        out, code = answer(command, args, store, settings, intake_error, int(time.time())), 0
+        out, code = answer(list(args.argv or ()), store, settings, intake_error, int(time.time())), 0
     except ContractError as exc:
-        out, code = {"contract_version": CONTRACT_VERSION, "error": {"code": exc.code, "message": str(exc)}}, 2
-    except InboxStoreError as exc:
-        out, code = {"contract_version": CONTRACT_VERSION, "error": {"code": "store", "message": str(exc)}}, 1
+        out, code = _error(exc.code, str(exc)), 2
+    except (InboxStoreError, sqlite3.Error, OSError, ValueError) as exc:
+        # Named by kind only: an SQLite or decoding message may quote stored content.
+        message = str(exc) if isinstance(exc, InboxStoreError) else f"the inbox file could not be used ({type(exc).__name__})"
+        out, code = _error("store", message), 1
     print(json.dumps(out, ensure_ascii=False))
     return code
+
+
+def _error(code: str, message: str) -> dict[str, Any]:
+    return {"contract_version": CONTRACT_VERSION, "error": {"code": code, "message": message}}
