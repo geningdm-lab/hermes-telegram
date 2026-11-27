@@ -67,7 +67,7 @@ From core.telegram.org, read 2026-11-25. "Prod" means production Telegram in a p
 | Stickers: send by `file_id`; `getStickerSet` lists a set's stickers with their emoji | Prod | Inbound only: described once with vision and cached (`gateway/sticker_cache.py`) | Agent tool over a sticker catalog |
 | Reactions, message effects, pin, edit, delete, quote replies | Prod | Reactions as status only | Agent tools |
 | Topics in private chats (9.3-10.5) | Prod | Yes | Kept |
-| Ephemeral messages, guest mode, bot-to-bot, business, checklists | Groups, business or opt-in | No | Out of scope |
+| Ephemeral messages, guest mode, bot-to-bot, business, checklists | Groups, business or opt-in | No | Out of scope; business messages are a separate feature ([business-inbox.md](business-inbox.md)) |
 
 ## Architecture
 
